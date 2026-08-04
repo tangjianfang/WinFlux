@@ -1,0 +1,13 @@
+# CMake build output
+out/
+build/
+CMakeUserPresets.json
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Misc
+Thumbs.db
