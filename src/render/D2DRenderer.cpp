@@ -27,86 +27,98 @@ float pt_to_dip(float pt) noexcept { return pt * 96.0f / 72.0f; }
 } // namespace
 
 D2DRenderer::~D2DRenderer() {
-    // ComPtr members release in declaration order; explicit ordering keeps
-    // the render target destroyed before its factory.
-    rt_.Reset();
     brushes_.clear();
     formats_.clear();
     dwrite_.Reset();
-    factory_.Reset();
+    last_rt_.Reset();
 }
 
-bool D2DRenderer::create(HWND hwnd) noexcept {
-    hwnd_ = hwnd;
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.GetAddressOf());
-    if (FAILED(hr)) return false;
-    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                             reinterpret_cast<IUnknown**>(dwrite_.GetAddressOf()));
-    if (FAILED(hr)) return false;
-    recreate_target();
-    return rt_ != nullptr;
+void D2DRenderer::attach(IPresenter& presenter) noexcept {
+    presenter_ = &presenter;
 }
 
-void D2DRenderer::recreate_target() noexcept {
-    brushes_.clear();
-    rt_.Reset();
-    if (factory_ == nullptr || hwnd_ == nullptr) return;
+bool D2DRenderer::valid() const noexcept {
+    return presenter_ != nullptr && presenter_->valid();
+}
 
-    RECT rc{};
-    GetClientRect(hwnd_, &rc);
-    width_px_ = static_cast<unsigned>(rc.right - rc.left);
-    height_px_ = static_cast<unsigned>(rc.bottom - rc.top);
-
-    const UINT dpi_x = GetDpiForWindow(hwnd_);
-    dpi_ = dpi_x != 0 ? static_cast<float>(dpi_x) : 96.0f;
-
-    const D2D1_SIZE_U size = D2D1::SizeU(width_px_, height_px_);
-    D2D1_RENDER_TARGET_PROPERTIES rtp = D2D1::RenderTargetProperties();
-    D2D1_HWND_RENDER_TARGET_PROPERTIES htp = D2D1::HwndRenderTargetProperties(hwnd_, size);
-    factory_->CreateHwndRenderTarget(rtp, htp, rt_.GetAddressOf());
+bool D2DRenderer::ensure_dwrite() noexcept {
+    if (dwrite_ != nullptr) return true;
+    return SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                             reinterpret_cast<IUnknown**>(dwrite_.GetAddressOf())));
 }
 
 void D2DRenderer::resize(unsigned width_px, unsigned height_px) noexcept {
-    if (rt_ == nullptr) return;
-    width_px_ = width_px;
-    height_px_ = height_px;
-    const HRESULT hr = rt_->Resize(D2D1::SizeU(width_px, height_px));
-    if (FAILED(hr)) {
-        // Device-lost path: rebuild the target and all device resources.
-        recreate_target();
-    }
+    if (presenter_ != nullptr) presenter_->resize(width_px, height_px);
 }
 
 void D2DRenderer::set_dpi(float dpi) noexcept {
     dpi_ = dpi > 0.0f ? dpi : 96.0f;
+    if (presenter_ != nullptr) presenter_->set_dpi(dpi_);
 }
 
-void D2DRenderer::begin(Color clear) noexcept {
-    if (rt_ == nullptr) return;
-    rt_->BeginDraw();
-    rt_->SetTransform(D2D1::Matrix3x2F::Scale(dpi_ / 96.0f, dpi_ / 96.0f));
-    rt_->Clear(to_d2d(clear));
-    clip_depth_ = 0;
+void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
+    frame_rt_ = nullptr;
+    if (presenter_ == nullptr) return;
+
+    SurfaceFrame frame = presenter_->begin_frame(dirty);
+    frame_rt_ = frame.rt;
+    if (frame_rt_ == nullptr) return;
+
+    // Device-lost recovery: if the target identity changed since the last
+    // frame, brushes created from the dead target are invalid — drop them.
+    if (last_rt_.Get() != frame_rt_) {
+        brushes_.clear();
+        last_rt_ = frame_rt_;   // AddRefs; releases the previous (possibly dead) RT
+    }
+
+    frame_offset_x_ = frame.offsetX;
+    frame_offset_y_ = frame.offsetY;
+
+    frame_rt_->BeginDraw();
+    // World transform: logical (96 DPI) -> device px, then into the returned
+    // DXGI surface coordinate space (subtract the update offset). For a full
+    // repaint the offset is (0,0) so this reduces to the legacy Scale(dpi/96).
+    frame_rt_->SetTransform(
+        D2D1::Matrix3x2F::Scale(dpi_ / 96.0f, dpi_ / 96.0f) *
+        D2D1::Matrix3x2F::Translation(-static_cast<float>(frame_offset_x_),
+                                     -static_cast<float>(frame_offset_y_)));
+
+    // Constrain drawing to the dirty region so a sub-allocated composition
+    // surface is never written outside the requested update rect. For a full
+    // repaint the clip covers the whole client area and is a no-op.
+    const Rect clip = (frame.dirty.w > 0.0f && frame.dirty.h > 0.0f)
+                          ? frame.dirty
+                          : Rect{0.0f, 0.0f, 1e6f, 1e6f};
+    frame_rt_->PushAxisAlignedClip(to_rect(clip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ++clip_depth_;
+
+    // Clear the dirty region to the background colour. For full repaint this
+    // is equivalent to Clear() over the whole surface; for a partial repaint
+    // it fills only the dirty rect (already clipped), preserving neighbours.
+    fill_rect(clip, clear);
 }
 
 void D2DRenderer::end() noexcept {
-    if (rt_ == nullptr) return;
+    if (frame_rt_ == nullptr) return;
+    ID2D1RenderTarget* rt = frame_rt_;
+    // Pop every outstanding clip (dirty clip + any left by render_element) so
+    // EndDraw sees a balanced clip stack.
     while (clip_depth_ > 0) {
-        rt_->PopAxisAlignedClip();
+        rt->PopAxisAlignedClip();
         --clip_depth_;
     }
-    const HRESULT hr = rt_->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) {
-        recreate_target();
-    }
+    frame_rt_ = nullptr;
+    // EndDraw + commit happen inside the presenter (it owns the composition).
+    if (presenter_ != nullptr) presenter_->end_frame();
 }
 
 ID2D1SolidColorBrush* D2DRenderer::brush(Color c) noexcept {
+    if (frame_rt_ == nullptr) return nullptr;
     const unsigned key = color_key(c);
     auto it = brushes_.find(key);
     if (it != brushes_.end()) return it->second.Get();
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> b;
-    if (rt_ == nullptr || FAILED(rt_->CreateSolidColorBrush(to_d2d(c), b.GetAddressOf()))) {
+    if (FAILED(frame_rt_->CreateSolidColorBrush(to_d2d(c), b.GetAddressOf()))) {
         return nullptr;
     }
     auto* raw = b.Get();
@@ -118,7 +130,7 @@ IDWriteTextFormat* D2DRenderer::format(float size_pt, bool bold) noexcept {
     const unsigned key = format_key(size_pt, bold);
     auto it = formats_.find(key);
     if (it != formats_.end()) return it->second.Get();
-    if (dwrite_ == nullptr) return nullptr;
+    if (!ensure_dwrite()) return nullptr;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> fmt;
     const HRESULT hr = dwrite_->CreateTextFormat(
         L"Segoe UI", nullptr,
@@ -132,38 +144,38 @@ IDWriteTextFormat* D2DRenderer::format(float size_pt, bool bold) noexcept {
 }
 
 void D2DRenderer::fill_rect(Rect r, Color c) noexcept {
-    if (rt_ == nullptr) return;
+    if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
-        rt_->FillRectangle(to_rect(r), b);
+        frame_rt_->FillRectangle(to_rect(r), b);
     }
 }
 
 void D2DRenderer::fill_round_rect(Rect r, float radius, Color c) noexcept {
-    if (rt_ == nullptr) return;
+    if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
         const float clamped = std::min(radius, std::min(r.w, r.h) * 0.5f);
-        rt_->FillRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b);
+        frame_rt_->FillRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b);
     }
 }
 
 void D2DRenderer::draw_round_rect(Rect r, float radius, Color c, float stroke_width) noexcept {
-    if (rt_ == nullptr) return;
+    if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
         const float clamped = std::min(radius, std::min(r.w, r.h) * 0.5f);
-        rt_->DrawRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b, stroke_width);
+        frame_rt_->DrawRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b, stroke_width);
     }
 }
 
 void D2DRenderer::draw_line(float x1, float y1, float x2, float y2, Color c, float stroke_width) noexcept {
-    if (rt_ == nullptr) return;
+    if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
-        rt_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), b, stroke_width);
+        frame_rt_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), b, stroke_width);
     }
 }
 
 void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
                             bool bold, Align halign) noexcept {
-    if (rt_ == nullptr || text.empty()) return;
+    if (frame_rt_ == nullptr || text.empty()) return;
     ID2D1SolidColorBrush* b = brush(c);
     IDWriteTextFormat* fmt = format(size_pt, bold);
     if (b == nullptr || fmt == nullptr) return;
@@ -172,13 +184,13 @@ void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Col
                         : halign == Align::end    ? DWRITE_TEXT_ALIGNMENT_TRAILING
                                                   : DWRITE_TEXT_ALIGNMENT_LEADING);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    rt_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, to_rect(r), b,
-                   D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    frame_rt_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, to_rect(r), b,
+                         D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 }
 
 std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
                                                   float size_pt, bool bold) noexcept {
-    if (text.empty() || dwrite_ == nullptr) return {0.0f, 0.0f};
+    if (text.empty() || !ensure_dwrite()) return {0.0f, 0.0f};
     IDWriteTextFormat* fmt = format(size_pt, bold);
     if (fmt == nullptr) return {0.0f, 0.0f};
 
@@ -194,14 +206,14 @@ std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
 }
 
 void D2DRenderer::push_clip(Rect r) noexcept {
-    if (rt_ == nullptr) return;
-    rt_->PushAxisAlignedClip(to_rect(r), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (frame_rt_ == nullptr) return;
+    frame_rt_->PushAxisAlignedClip(to_rect(r), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     ++clip_depth_;
 }
 
 void D2DRenderer::pop_clip() noexcept {
-    if (rt_ == nullptr || clip_depth_ <= 0) return;
-    rt_->PopAxisAlignedClip();
+    if (frame_rt_ == nullptr || clip_depth_ <= 0) return;
+    frame_rt_->PopAxisAlignedClip();
     --clip_depth_;
 }
 

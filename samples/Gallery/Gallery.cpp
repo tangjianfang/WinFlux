@@ -146,7 +146,7 @@ ElementPtr footer(App& app) {
     p.font_size_pt = tokens::font_caption;
     p.text_color = pal.text_secondary;
     p.text_align = Align::start;
-    return label(L"Direct2D scene tree \u00B7 one HWND \u00B7 flex layout \u00B7 Tab cycles focus",
+    return label(L"DirectComposition scene tree \u00B7 dirty-region repaint \u00B7 flex layout \u00B7 Tab cycles focus",
                  std::move(p));
 }
 

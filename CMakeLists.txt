@@ -15,6 +15,9 @@ include(WinFluxCompilerOptions)
 add_library(flux STATIC
     src/platform/AppHost.cpp
     src/render/D2DRenderer.cpp
+    src/render/DCompPresenter.cpp
+    src/render/HwndPresenter.cpp
+    src/render/Damage.cpp
     src/layout/FlexLayout.cpp
     src/theme/Theme.cpp
     src/core/Host.cpp
@@ -25,7 +28,7 @@ target_include_directories(flux PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_compile_definitions(flux PUBLIC UNICODE _UNICODE _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(flux PUBLIC d2d1 dwrite windowscodecs)
+target_link_libraries(flux PUBLIC d2d1 dwrite windowscodecs dcomp d3d11 dxgi)
 flux_apply_compiler_options(flux)
 
 add_executable(WinFluxGallery WIN32 samples/Gallery/Gallery.cpp)
@@ -37,3 +40,11 @@ add_executable(WinFluxSmokeTest tests/smoke.cpp)
 target_link_libraries(WinFluxSmokeTest PRIVATE WinFlux::flux)
 flux_apply_compiler_options(WinFluxSmokeTest)
 add_test(NAME WinFluxSmokeTest COMMAND WinFluxSmokeTest)
+
+# Harness finding #2: Host lifecycle / presenter selection is not headless,
+# so it lives in its own CTest target. Failure is isolated from the always-
+# fast smoke test (which stays purely CPU).
+add_executable(WinFluxHostLifecycleTest tests/host_lifecycle.cpp)
+target_link_libraries(WinFluxHostLifecycleTest PRIVATE WinFlux::flux)
+flux_apply_compiler_options(WinFluxHostLifecycleTest)
+add_test(NAME WinFluxHostLifecycleTest COMMAND WinFluxHostLifecycleTest)

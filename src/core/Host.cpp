@@ -183,11 +183,16 @@ bool Host::create(const Config& config, HINSTANCE instance) noexcept {
                                 nullptr, nullptr, instance, this);
     if (hwnd == nullptr) return false;
 
-    if (!renderer_.create(hwnd)) {
+    if (dcomp_presenter_.create(hwnd)) {
+        presenter_ = &dcomp_presenter_;
+    } else if (hwnd_presenter_.create(hwnd)) {
+        presenter_ = &hwnd_presenter_;
+    } else {
         DestroyWindow(hwnd);
         hwnd_ = nullptr;
         return false;
     }
+    renderer_.attach(*presenter_);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     return true;
@@ -201,7 +206,9 @@ void Host::set_root_builder(std::function<ElementPtr()> builder) noexcept {
 }
 
 void Host::request_render() noexcept {
-    if (hwnd_ != nullptr) InvalidateRect(hwnd_, nullptr, FALSE);
+    if (hwnd_ == nullptr || painting_) return;
+    paint_frame();   // drive the presenter directly (no InvalidateRect round-trip)
+    if (hwnd_ != nullptr) ValidateRect(hwnd_, nullptr);   // clear dirty; avoid a double WM_PAINT
 }
 
 void Host::set_theme_mode(ThemeMode mode) noexcept {
@@ -239,6 +246,7 @@ float Host::to_logical_px(int px) const noexcept {
 
 void Host::handle_size(unsigned width_px, unsigned height_px) noexcept {
     renderer_.resize(width_px, height_px);
+    force_full_dirty_ = true;   // surface geometry changed — diff is meaningless
     request_render();
 }
 
@@ -249,6 +257,7 @@ void Host::handle_dpi_changed(unsigned dpi, const RECT& suggested) noexcept {
                      suggested.right - suggested.left, suggested.bottom - suggested.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    force_full_dirty_ = true;   // DPI change invalidates every primitive's size
     request_render();
 }
 
@@ -414,14 +423,15 @@ void Host::handle_key_down(WPARAM vk) noexcept {
 // =====================================================================
 
 void Host::paint_frame() noexcept {
-    if (!renderer_.valid()) return;
+    if (painting_ || !renderer_.valid()) return;
+    painting_ = true;
 
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     const float logical_w = to_logical_px(rc.right - rc.left);
     const float logical_h = to_logical_px(rc.bottom - rc.top);
 
-    // Rebuild the scene tree from the root builder (React re-render).
+    // Rebuild the scene tree (React re-render).
     tree_ = root_builder_ ? root_builder_() : nullptr;
     if (tree_ != nullptr) {
         LayoutContext ctx;
@@ -436,9 +446,40 @@ void Host::paint_frame() noexcept {
         flex_layout(*tree_, logical_w, logical_h, ctx);
     }
 
-    renderer_.begin(shown_.background);
+    // Compute damage. resize / DPI change / theme fade in progress force a
+    // fullscreen update; otherwise diff prev_tree_ against the new tree.
+    std::vector<Rect> dirty_rects;
+    if (force_full_dirty_ || fading_) {
+        if (logical_w > 0.0f && logical_h > 0.0f) {
+            dirty_rects.push_back(Rect{0.0f, 0.0f, logical_w, logical_h});
+        }
+    } else {
+        dirty_rects = damage_tracker_.compute(prev_tree_.get(), tree_.get(),
+                                              logical_w, logical_h);
+    }
+    force_full_dirty_ = false;
+    prev_tree_ = tree_;
+
+    if (dirty_rects.empty()) {
+        painting_ = false;
+        return;   // nothing changed; the composition visual is already correct
+    }
+
+    // Collapse the dirty set to a single bounding rect for the Presenter.
+    Rect dr = dirty_rects[0];
+    for (size_t i = 1; i < dirty_rects.size(); ++i) {
+        const float x1 = std::min(dr.x, dirty_rects[i].x);
+        const float y1 = std::min(dr.y, dirty_rects[i].y);
+        const float x2 = std::max(dr.x + dr.w, dirty_rects[i].x + dirty_rects[i].w);
+        const float y2 = std::max(dr.y + dr.h, dirty_rects[i].y + dirty_rects[i].h);
+        dr = Rect{x1, y1, x2 - x1, y2 - y1};
+    }
+
+    renderer_.begin(shown_.background, &dr);
     if (tree_ != nullptr) render_element(*tree_, Path{});
     renderer_.end();
+
+    painting_ = false;
 }
 
 void Host::render_element(const Element& e, const Path& path) noexcept {

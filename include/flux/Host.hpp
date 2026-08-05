@@ -14,7 +14,11 @@
 #include <vector>
 
 #include "D2DRenderer.hpp"
+#include "DCompPresenter.hpp"
+#include "Damage.hpp"
+#include "HwndPresenter.hpp"
 #include "Element.hpp"
+#include "Presenter.hpp"
 #include "Theme.hpp"
 
 namespace flux {
@@ -102,6 +106,13 @@ private:
     static bool is_prefix(const Path& prefix, const Path& full) noexcept;
 
     D2DRenderer renderer_;
+    DCompPresenter dcomp_presenter_;   // default path
+    HwndPresenter hwnd_presenter_;      // fallback when DComp creation fails
+    IPresenter* presenter_ = nullptr;   // points at whichever presenter is live
+    DamageTracker damage_tracker_;      // Phase 2 diff for partial repaint
+    bool painting_ = false;             // re-entrancy guard for direct-draw
+    bool force_full_dirty_ = false;     // resize/DPI/theme-fade => fullscreen dirty
+    ElementPtr prev_tree_;              // previous frame's laid-out scene tree
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
     std::function<ElementPtr()> root_builder_;

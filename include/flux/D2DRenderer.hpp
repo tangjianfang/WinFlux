@@ -1,9 +1,12 @@
 #pragma once
 
-// WinFlux render layer — Direct2D 1.1 + DirectWrite. One HWND render
-// target per Host window; the whole scene tree is composited into it each
-// frame. All draw calls take LOGICAL units (96 DPI baseline); begin() loads
-// a uniform scale transform of dpi/96 so callers never touch device pixels.
+// WinFlux render layer — Direct2D + DirectWrite draw commands. The renderer
+// no longer owns a render target; it is attached to an IPresenter (DComp by
+// default, Hwnd fallback) which supplies a per-frame drawing surface. All
+// draw calls take LOGICAL units (96 DPI baseline); begin() loads a uniform
+// scale transform of dpi/96 (plus the presenter's update-offset translation)
+// so callers never touch device pixels. The brush/format caches are cleared
+// when the underlying render target is recreated (device-lost recovery).
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -14,16 +17,10 @@
 #include <utility>
 
 #include "Element.hpp"
+#include "Presenter.hpp"   // Rect + IPresenter + SurfaceFrame
 #include "Theme.hpp"
 
 namespace flux {
-
-struct Rect {
-    float x = 0.0f;
-    float y = 0.0f;
-    float w = 0.0f;
-    float h = 0.0f;
-};
 
 class D2DRenderer {
 public:
@@ -32,13 +29,17 @@ public:
     D2DRenderer(const D2DRenderer&) = delete;
     D2DRenderer& operator=(const D2DRenderer&) = delete;
 
-    [[nodiscard]] bool create(HWND hwnd) noexcept;
+    // Binds the renderer to a presenter that owns the device + surface. The
+    // renderer never outlives the presenter; Host owns both and tears the
+    // renderer down first.
+    void attach(IPresenter& presenter) noexcept;
     void resize(unsigned width_px, unsigned height_px) noexcept;
     void set_dpi(float dpi) noexcept;
     [[nodiscard]] float dpi() const noexcept { return dpi_; }
-    [[nodiscard]] bool valid() const noexcept { return rt_ != nullptr; }
+    [[nodiscard]] bool valid() const noexcept;
 
-    void begin(Color clear) noexcept;
+    // dirty == nullptr => update the whole client area (full repaint).
+    void begin(Color clear, const Rect* dirty) noexcept;
     void end() noexcept;
 
     void fill_rect(Rect r, Color c) noexcept;
@@ -55,16 +56,16 @@ public:
 private:
     [[nodiscard]] ID2D1SolidColorBrush* brush(Color c) noexcept;
     [[nodiscard]] IDWriteTextFormat* format(float size_pt, bool bold) noexcept;
-    void recreate_target() noexcept;
+    bool ensure_dwrite() noexcept;
 
-    Microsoft::WRL::ComPtr<ID2D1Factory> factory_;
+    IPresenter* presenter_ = nullptr;
+    ID2D1RenderTarget* frame_rt_ = nullptr;   // transient, valid only during begin/end
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> last_rt_;  // device-lost cache invalidation
+    int frame_offset_x_ = 0;
+    int frame_offset_y_ = 0;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
-    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> rt_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>> brushes_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextFormat>> formats_;
-    HWND hwnd_ = nullptr;
-    unsigned width_px_ = 0;
-    unsigned height_px_ = 0;
     float dpi_ = 96.0f;
     int clip_depth_ = 0;
 };
