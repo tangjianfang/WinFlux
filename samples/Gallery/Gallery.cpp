@@ -79,11 +79,11 @@ ElementPtr section_card(const wchar_t* title, ElementPtr body, const Palette& pa
     Props card_p;
     card_p.background = pal.surface;
     card_p.radius = static_cast<float>(tokens::radius_card);
-    card_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
-                                static_cast<float>(tokens::spacing_md),
-                                static_cast<float>(tokens::spacing_md),
-                                static_cast<float>(tokens::spacing_md)};
-    card_p.gap = static_cast<float>(tokens::spacing_sm);
+    card_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_lg),
+                                static_cast<float>(tokens::spacing_lg),
+                                static_cast<float>(tokens::spacing_lg),
+                                static_cast<float>(tokens::spacing_lg)};
+    card_p.gap = static_cast<float>(tokens::spacing_md);
 
     Props title_p;
     title_p.font_size_pt = tokens::font_subtitle;
@@ -589,17 +589,37 @@ ElementPtr build(App& app) {
     Props root_p;
     root_p.direction = Direction::column;
     root_p.padding = pad_all(static_cast<float>(tokens::spacing_lg));
-    root_p.gap = static_cast<float>(tokens::spacing_md);
+    root_p.gap = static_cast<float>(tokens::spacing_lg);
     root_p.background = pal.background;
+
+    // Two-column body. Without flex-wrap the only way to get a multi-column
+    // page is an explicit row of two columns; each column then stacks its
+    // own sections vertically. Header + footer span full width above and
+    // below.
+    Props body_p;
+    body_p.direction = Direction::row;
+    body_p.align = Align::start;
+    body_p.gap = static_cast<float>(tokens::spacing_lg);
+
+    auto left_col = col_view({
+        buttons_section(app),
+        checkboxes_section(app),
+        progress_section(app),
+    }, static_cast<float>(tokens::spacing_lg), Align::start);
+
+    auto right_col = col_view({
+        typography_section(app),
+        containers_section(app),
+        layout_section(app),
+    }, static_cast<float>(tokens::spacing_lg), Align::start);
+
+    auto body = view(std::move(body_p));
+    body->children.push_back(std::move(left_col));
+    body->children.push_back(std::move(right_col));
 
     auto parent = view(std::move(root_p));
     parent->children.push_back(header(app));
-    parent->children.push_back(buttons_section(app));
-    parent->children.push_back(checkboxes_section(app));
-    parent->children.push_back(progress_section(app));
-    parent->children.push_back(typography_section(app));
-    parent->children.push_back(containers_section(app));
-    parent->children.push_back(layout_section(app));
+    parent->children.push_back(std::move(body));
     parent->children.push_back(footer(app));
     return parent;
 }
@@ -618,7 +638,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     Host::Config cfg;
     cfg.title = L"WinFlux Gallery";
-    cfg.width = 1000;
+    cfg.width = 1200;
     cfg.height = 1100;
     if (!app.host.create(cfg, instance)) {
         MessageBoxW(nullptr, L"WinFlux host creation failed (Direct2D unavailable?).",
