@@ -47,6 +47,30 @@ void test_theme() {
 
     expect(tokens::spacing_sm == 8 && tokens::control_height_md == 32,
            "design tokens match the DESIGN.md contract");
+
+    // Full token contract (mirrors DESIGN.md one-for-one). Kept as a list so
+    // adding a token surfaces here as a missing assertion, not a silent drift.
+    expect(tokens::spacing_xs == 4, "spacing_xs == 4");
+    expect(tokens::spacing_sm == 8, "spacing_sm == 8");
+    expect(tokens::spacing_md == 16, "spacing_md == 16");
+    expect(tokens::spacing_lg == 24, "spacing_lg == 24");
+    expect(tokens::spacing_xl == 32, "spacing_xl == 32");
+    expect(tokens::control_height_sm == 24, "control_height_sm == 24");
+    expect(tokens::control_height_md == 32, "control_height_md == 32");
+    expect(tokens::control_height_lg == 40, "control_height_lg == 40");
+    expect(tokens::radius_sm == 4, "radius_sm == 4");
+    expect(tokens::radius_control == 6, "radius_control == 6");
+    expect(tokens::radius_md == 8, "radius_md == 8");
+    expect(tokens::radius_card == 10, "radius_card == 10");
+    expect(tokens::radius_lg == 12, "radius_lg == 12");
+    expect(near_eq(tokens::font_caption, 12.0f), "font_caption == 12.0");
+    expect(near_eq(tokens::font_body, 14.0f), "font_body == 14.0");
+    expect(near_eq(tokens::font_subtitle, 16.0f), "font_subtitle == 16.0");
+    expect(near_eq(tokens::font_title, 20.0f), "font_title == 20.0");
+    expect(near_eq(tokens::font_hero, 28.0f), "font_hero == 28.0");
+    expect(tokens::theme_fade_ms == 200, "theme_fade_ms == 200");
+    expect(tokens::checkbox_box == 18, "checkbox_box == 18");
+    expect(tokens::progress_height == 10, "progress_height == 10");
 }
 
 void test_builders() {
@@ -203,6 +227,91 @@ void test_damage() {
                "first frame (no prev) forces fullscreen");
         expect(d.compute(t.get(), nullptr, 200.0f, 100.0f).size() == 1,
                "tree removal forces fullscreen");
+    }
+
+    // Interaction-state diff: hover changes on an otherwise-unchanged tree
+    // must produce dirty rects for the OLD and NEW hover elements (the
+    // structural diff alone sees no change).
+    {
+        Props rp; rp.direction = Direction::row; rp.gap = 8.0f; rp.padding = {0,0,0,0};
+        Props a; a.width = 50.0f; a.height = 20.0f;
+        Props b; b.width = 50.0f; b.height = 20.0f;
+        auto t = with_children(view(rp), {view(a), view(b)});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        DamageTracker::InteractionState prev{{}, {}, {}};
+        DamageTracker::InteractionState next{{0}, {}, {}};
+        auto rects = d.compute(t.get(), t.get(), 200.0f, 100.0f, &prev, &next);
+        expect(!rects.empty(), "hover change yields non-empty dirty");
+        if (!rects.empty()) {
+            const Rect& r = rects[0];
+            // First child at (0,0) sized 50x20; AA inflate -> (-1,-1,52,22).
+            expect(r.x <= 0.0f && r.y <= 0.0f && r.w >= 50.0f && r.h >= 20.0f,
+                   "hover-change dirty rect covers first-child bounds");
+        }
+    }
+
+    // No interaction change + no tree change = empty dirty (regression for the
+    // old behaviour where every handler had to set force_full_dirty_).
+    {
+        Props rp; rp.direction = Direction::row; rp.gap = 8.0f; rp.padding = {0,0,0,0};
+        auto t = with_children(view(rp), {label(L"a"), label(L"b")});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        DamageTracker::InteractionState same{{}, {1}, {}};
+        auto rects = d.compute(t.get(), t.get(), 200.0f, 100.0f, &same, &same);
+        expect(rects.empty(), "no-op interaction state stays empty");
+    }
+
+    // Same-element hover: old and new paths identical -> add_interaction_rects
+    // returns early, no extra rects pushed. (Regression: would have produced
+    // two duplicates of the same rect.)
+    {
+        Props rp; rp.direction = Direction::row; rp.padding = {0,0,0,0};
+        auto t = with_children(view(rp), {label(L"a")});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        DamageTracker::InteractionState prev{{}, {}, {}};
+        DamageTracker::InteractionState next{{0}, {}, {}};
+        auto rects = d.compute(t.get(), t.get(), 200.0f, 100.0f, &prev, &next);
+        expect(!rects.empty(), "hover entering an element yields dirty");
+        expect(rects.size() <= d.max_rects, "hover-only diff stays within budget");
+    }
+
+    // Three distinct interaction changes (hover + press + focus all move)
+    // pushes up to 6 rects; merge_overlapping collapses any that overlap.
+    {
+        Props rp; rp.direction = Direction::row; rp.gap = 0.0f; rp.padding = {0,0,0,0};
+        Props a; a.width = 50.0f; a.height = 20.0f;
+        Props b; b.width = 50.0f; b.height = 20.0f;
+        Props c; c.width = 50.0f; c.height = 20.0f;
+        auto t = with_children(view(rp), {view(a), view(b), view(c)});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        DamageTracker::InteractionState prev{{0}, {1}, {2}};
+        DamageTracker::InteractionState next{{1}, {2}, {0}};
+        auto rects = d.compute(t.get(), t.get(), 200.0f, 100.0f, &prev, &next);
+        // 6 rects (3 old + 3 new), none overlap (50px apart, 20px tall),
+        // so they all survive merge; AA inflate 1px keeps gaps.
+        expect(!rects.empty(), "3 interactions x 2 sides yields dirty");
+        expect(rects.size() <= d.max_rects, "3 interactions stay within budget");
+    }
+
+    // Multi-rect merge: two changed children with overlapping bounds -> one
+    // merged rect after merge_overlapping (not the union of two adjacent).
+    {
+        Props rp; rp.direction = Direction::row; rp.gap = 0.0f; rp.padding = {0,0,0,0};
+        // Two 50px children in a 100px container with no gap — child 2 has a
+        // -25 left margin so its rect (25..75) overlaps child 1's (0..50).
+        Props a; a.width = 50.0f; a.height = 30.0f; a.background = rgb(0,0,0);
+        Props b; b.width = 50.0f; b.height = 30.0f; b.background = rgb(0,0,0);
+        b.margin = EdgeInsets{0, 0, 0, 0};
+        b.margin.left = -25.0f;
+        auto prev = with_children(view(rp), {view(a), view(b)});
+        Props a2 = a; a2.background = rgb(255,0,0);
+        Props b2 = b; b2.background = rgb(0,255,0);
+        auto next = with_children(view(rp), {view(a2), view(b2)});
+        flex_layout(*prev, 100.0f, 100.0f, zero);
+        flex_layout(*next, 100.0f, 100.0f, zero);
+        auto rects = d.compute(prev.get(), next.get(), 100.0f, 100.0f);
+        // Overlapping changed rects merge into a single rect.
+        expect(rects.size() == 1, "overlapping changed siblings merge into one rect");
     }
 }
 

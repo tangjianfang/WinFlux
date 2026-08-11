@@ -24,12 +24,34 @@ struct DamageTracker {
     unsigned max_rects = 8;
     static constexpr float kAAInflate = 1.0f;
 
+    // Three paths whose old + new rects should be added to the dirty set when
+    // they differ between frames. The Diff alone can't see hover/press/focus
+    // because those are interaction state, not element-tree state; without
+    // this, handlers would have to force a fullscreen repaint on every
+    // interaction (the altitude trap we're trying to escape).
+    struct InteractionState {
+        using Path = std::vector<int>;
+        Path hover;
+        Path pressed;
+        Path focus;
+    };
+
     // canvas_w/h are the client area in logical units (used for the
-    // fullscreen fallback and to clamp negatives).
+    // fullscreen fallback and to clamp negatives). prev_interaction /
+    // next_interaction are optional; when supplied and any of the three
+    // paths differ, both the old (resolved in prev) and the new (resolved in
+    // next) element rects are added to the dirty set.
     [[nodiscard]] std::vector<Rect> compute(const Element* prev,
                                             const Element* next,
                                             float canvas_w,
-                                            float canvas_h) const noexcept;
+                                            float canvas_h,
+                                            const InteractionState* prev_interaction = nullptr,
+                                            const InteractionState* next_interaction = nullptr) const noexcept;
+
+    // Resolve a child-index path against a tree root. Returns nullptr on
+    // out-of-range indices or an empty root.
+    [[nodiscard]] static const Element* resolve_path(const Element* root,
+                                                     const InteractionState::Path& path) noexcept;
 
     // Compare paint-relevant Props fields. Layout-only fields (flex_grow,
     // direction, padding, margin, gap, align) are not compared here because

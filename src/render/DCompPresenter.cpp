@@ -1,17 +1,21 @@
 #include <flux/DCompPresenter.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 namespace flux {
 
 namespace {
 
 RECT to_physical_rect(const Rect& r, float scale, unsigned surf_w, unsigned surf_h) noexcept {
+    // floor() for left/top, ceil() for right/bottom — anything inside the
+    // logical rect must be inside the physical rect, never outside it (1px
+    // stale sliver at fractional DPI would otherwise leak through).
     RECT out{};
-    out.left = static_cast<LONG>(r.x * scale);
-    out.top = static_cast<LONG>(r.y * scale);
-    out.right = static_cast<LONG>((r.x + r.w) * scale);
-    out.bottom = static_cast<LONG>((r.y + r.h) * scale);
+    out.left = static_cast<LONG>(std::floor(r.x * scale));
+    out.top = static_cast<LONG>(std::floor(r.y * scale));
+    out.right = static_cast<LONG>(std::ceil((r.x + r.w) * scale));
+    out.bottom = static_cast<LONG>(std::ceil((r.y + r.h) * scale));
     out.left = std::max<LONG>(0, std::min<LONG>(out.left, static_cast<LONG>(surf_w)));
     out.top = std::max<LONG>(0, std::min<LONG>(out.top, static_cast<LONG>(surf_h)));
     out.right = std::max<LONG>(0, std::min<LONG>(out.right, static_cast<LONG>(surf_w)));
@@ -151,7 +155,13 @@ void DCompPresenter::resize(unsigned width_px, unsigned height_px) noexcept {
     height_px_ = height_px == 0 ? 1 : height_px;
     if (dcomp_device_ == nullptr) return;
     release_surface();
-    if (!create_surface(width_px_, height_px_)) return;
+    if (!create_surface(width_px_, height_px_)) {
+        // create_surface released the old surface above; if the new one can't
+        // be created, the visual's content pointer is dangling. Detach it so
+        // a subsequent commit doesn't dereference freed memory.
+        if (root_visual_ != nullptr) root_visual_->SetContent(nullptr);
+        return;
+    }
     dcomp_device_->Commit();
 }
 
@@ -160,26 +170,38 @@ void DCompPresenter::set_dpi(float dpi) noexcept {
 }
 
 bool DCompPresenter::rebuild_d2d() noexcept {
-    // Device-lost recovery: recreate the D2D device/context and surface but
-    // keep the DComp target/visual (they are independent of the D2D device).
-    release_d2d();
+    // Device-lost recovery: DComp holds a reference to the OLD dxgi_device_,
+    // so a new ID3D11Device means a new IDXGIDevice means a new
+    // IDCompositionDevice. The target/visual are owned by the old device and
+    // must be torn down before re-creating against the new one.
     release_surface();
+    root_visual_.Reset();
+    dcomp_target_.Reset();
+    dcomp_device_.Reset();
+    release_d2d();
+    dxgi_device_.Reset();
+    d3d_device_.Reset();
+
     if (!create_device_resources()) return false;
-    if (!create_surface(width_px_, height_px_)) return false;
-    if (root_visual_ != nullptr) root_visual_->SetContent(surface_.Get());
-    if (dcomp_device_ != nullptr) dcomp_device_->Commit();
+    if (!create_composition()) return false;
+    rebuilt_this_frame_ = true;
     return true;
 }
 
 SurfaceFrame DCompPresenter::begin_frame(const Rect* dirty) noexcept {
     SurfaceFrame frame;
+    rebuilt_this_frame_ = false;
     if (!valid() || hwnd_ == nullptr) return frame;
 
     const float scale = dpi_ / 96.0f;
     Rect dirty_logical = (dirty != nullptr) ? *dirty : Rect{};
     if (dirty_logical.w <= 0.0f || dirty_logical.h <= 0.0f) {
-        dirty_logical = Rect{0.0f, 0.0f, static_cast<float>(width_px_),
-                             static_cast<float>(height_px_)};
+        // null/empty dirty → update the whole client area. Logical units, not
+        // physical pixels — to_physical_rect multiplies by scale, and a clip
+        // sized in physical pixels would be (scale)x too wide otherwise.
+        dirty_logical = Rect{0.0f, 0.0f,
+                             static_cast<float>(width_px_)  / scale,
+                             static_cast<float>(height_px_) / scale};
     }
 
     const RECT phys = to_physical_rect(dirty_logical, scale, width_px_, height_px_);
@@ -211,6 +233,10 @@ SurfaceFrame DCompPresenter::begin_frame(const Rect* dirty) noexcept {
     frame.dirty = dirty_logical;
     frame.offsetX = updateOffset.x;
     frame.offsetY = updateOffset.y;
+    frame.physLeft = phys.left;
+    frame.physTop = phys.top;
+    frame.physWidth = phys.right - phys.left;
+    frame.physHeight = phys.bottom - phys.top;
     return frame;
 }
 
@@ -221,13 +247,22 @@ void DCompPresenter::end_frame() noexcept {
     const HRESULT hr = context_->EndDraw();
     context_->SetTarget(nullptr);
     frame_bitmap_.Reset();
-    surface_->EndDraw();
 
-    if (hr == D2DERR_RECREATE_TARGET) {
+    // surface_->EndDraw can fail with DXGI_ERROR_DEVICE_REMOVED independently
+    // of the D2D context — that path was previously silent and left the next
+    // frame BeginDrawing on a broken surface. Treat it the same as a D2D
+    // recreate-target event.
+    const HRESULT surf_hr = (surface_ != nullptr) ? surface_->EndDraw()
+                                                  : DXGI_ERROR_DEVICE_REMOVED;
+    if (surf_hr == DXGI_ERROR_DEVICE_REMOVED || surf_hr == D2DERR_RECREATE_TARGET) {
         rebuild_d2d();
-        // Rebuild already commits; fall through to a final commit regardless.
     }
-    if (dcomp_device_ != nullptr) dcomp_device_->Commit();
+    if (hr == D2DERR_RECREATE_TARGET) rebuild_d2d();
+
+    // rebuild_d2d already committed (during create_composition); the trailing
+    // Commit would cost an extra GPU sync per recovery and stall a tight
+    // device-lost loop.
+    if (dcomp_device_ != nullptr && !rebuilt_this_frame_) dcomp_device_->Commit();
 }
 
 bool DCompPresenter::valid() const noexcept {

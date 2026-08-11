@@ -29,14 +29,23 @@ struct Rect {
 //   rt        — the D2D render target to issue draw calls on this frame
 //   dirty     — the dirty rect actually being updated, in logical units
 //   offsetX/Y — the IDCompositionSurface::BeginDraw update offset, in
-//                physical surface pixels; the renderer subtracts it from the
-//                world transform so logical coordinates land correctly inside
-//                the (possibly sub-allocated) returned DXGI surface.
+//                physical surface pixels; the renderer composes a world
+//                transform of `Scale(s) * Translation(offsetX - physLeft,
+//                offsetY - physTop)` so logical coordinates land correctly
+//                inside the (possibly sub-allocated) returned DXGI surface.
+//   physLeft/Top — the dirty rect's physical-pixel origin on the composition
+//                surface. The renderer needs this to build the clip rect
+//                in DXGI/DIP units (PushAxisAlignedClip is NOT affected by
+//                the world transform). For a full-surface repaint both are 0.
 struct SurfaceFrame {
     ID2D1RenderTarget* rt = nullptr;
     Rect dirty{};
     int offsetX = 0;
     int offsetY = 0;
+    int physLeft = 0;
+    int physTop = 0;
+    int physWidth = 0;
+    int physHeight = 0;
 };
 
 class IPresenter {

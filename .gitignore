@@ -11,3 +11,9 @@ CMakeUserPresets.json
 
 # Misc
 Thumbs.db
+
+# Tooling-generated
+.qoder/
+
+# Scratch pixel-diffing scripts
+/*.ps1

@@ -117,10 +117,40 @@ bool DamageTracker::paint_props_equal(const Props& a, const Props& b) noexcept {
     return true;
 }
 
+const Element* DamageTracker::resolve_path(const Element* root,
+                                           const InteractionState::Path& path) noexcept {
+    if (root == nullptr) return nullptr;
+    const Element* node = root;
+    for (const int index : path) {
+        if (index < 0 || static_cast<size_t>(index) >= node->children.size()) return nullptr;
+        node = node->children[static_cast<size_t>(index)].get();
+    }
+    return node;
+}
+
+namespace {
+void add_interaction_rects(const Element* prev, const Element* next,
+                           const DamageTracker::InteractionState::Path& old_path,
+                           const DamageTracker::InteractionState::Path& new_path,
+                           std::vector<Rect>& out) noexcept {
+    if (old_path == new_path) return;
+    if (const Element* e = DamageTracker::resolve_path(prev, old_path);
+        e != nullptr && rect_valid(rect_of(*e))) {
+        out.push_back(rect_of(*e));
+    }
+    if (const Element* e = DamageTracker::resolve_path(next, new_path);
+        e != nullptr && rect_valid(rect_of(*e))) {
+        out.push_back(rect_of(*e));
+    }
+}
+} // namespace
+
 std::vector<Rect> DamageTracker::compute(const Element* prev,
                                          const Element* next,
                                          float canvas_w,
-                                         float canvas_h) const noexcept {
+                                         float canvas_h,
+                                         const InteractionState* prev_interaction,
+                                         const InteractionState* next_interaction) const noexcept {
     const Rect full{0.0f, 0.0f,
                     canvas_w > 0.0f ? canvas_w : 0.0f,
                     canvas_h > 0.0f ? canvas_h : 0.0f};
@@ -136,6 +166,17 @@ std::vector<Rect> DamageTracker::compute(const Element* prev,
 
     std::vector<Rect> raw;
     diff_subtree(prev, next, raw);
+
+    // Interaction diff: hover/press/focus are state, not part of the element
+    // tree, so the structural diff above won't catch them. Resolve the OLD
+    // path against the PREVIOUS tree and the NEW path against the NEXT tree,
+    // push both rects (if valid) into the dirty set so the renderer can see
+    // the highlight changes.
+    if (prev_interaction != nullptr && next_interaction != nullptr) {
+        add_interaction_rects(prev, next, prev_interaction->hover,  next_interaction->hover,  raw);
+        add_interaction_rects(prev, next, prev_interaction->pressed, next_interaction->pressed, raw);
+        add_interaction_rects(prev, next, prev_interaction->focus,  next_interaction->focus,  raw);
+    }
 
     // No changes at all -> empty dirty set; caller can skip the draw.
     if (raw.empty()) return raw;

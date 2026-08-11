@@ -36,14 +36,23 @@ void HwndPresenter::recreate_target() noexcept {
     rtp.dpiX = 96.0f;
     rtp.dpiY = 96.0f;   // DIP == device px, matching the DComp context path
     D2D1_HWND_RENDER_TARGET_PROPERTIES htp = D2D1::HwndRenderTargetProperties(hwnd_, size);
-    factory_->CreateHwndRenderTarget(rtp, htp, rt_.GetAddressOf());
+    // Surface silent failure: a persistent transient error here would leave
+    // valid() returning true (factory exists) but rt_ == nullptr, so the
+    // renderer would BeginDraw on a null target. Log once and bail.
+    const HRESULT hr = factory_->CreateHwndRenderTarget(rtp, htp, rt_.GetAddressOf());
+    if (FAILED(hr)) {
+        OutputDebugStringW(L"WinFlux: HwndPresenter::recreate_target failed\n");
+    }
 }
 
 void HwndPresenter::resize(unsigned width_px, unsigned height_px) noexcept {
-    width_px_ = width_px;
-    height_px_ = height_px;
+    // ID2D1HwndRenderTarget::Resize rejects 0x0 (E_INVALIDARG). WM_SIZE
+    // SIZE_MINIMIZED delivers lParam=0; clamping to 1x1 lets us keep a live
+    // RT through the minimized state and restore on the next WM_SIZE.
+    width_px_ = width_px == 0 ? 1 : width_px;
+    height_px_ = height_px == 0 ? 1 : height_px;
     if (rt_ == nullptr) return;
-    const HRESULT hr = rt_->Resize(D2D1::SizeU(width_px, height_px));
+    const HRESULT hr = rt_->Resize(D2D1::SizeU(width_px_, height_px_));
     if (FAILED(hr)) recreate_target();
 }
 

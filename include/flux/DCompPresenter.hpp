@@ -60,6 +60,11 @@ private:
     unsigned height_px_ = 0;
     float dpi_ = 96.0f;
     bool drew_this_frame_ = false;
+    // Set when rebuild_d2d ran during this frame's begin/end_frame. Suppresses
+    // the redundant Commit() that would otherwise fire after rebuild_d2d's own
+    // internal Commit (double-commit stalls the compositor on device-lost
+    // loops). Reset at the start of every begin_frame.
+    bool rebuilt_this_frame_ = false;
 };
 
 } // namespace flux
