@@ -164,6 +164,29 @@ std::vector<Rect> DamageTracker::compute(const Element* prev,
     // Root structural change -> full repaint.
     if (prev->type != next->type) return std::vector<Rect>{full};
 
+    // Same-tree fast-path. Pointer equality means the two walks would visit
+    // the same nodes at the same addresses — guaranteed to find no structural
+    // difference. Only interaction state (hover/press/focus) can still produce
+    // dirty rects, so skip diff_subtree entirely and check just the paths.
+    if (prev == next) {
+        const bool interaction_changed =
+            prev_interaction != nullptr && next_interaction != nullptr &&
+            (prev_interaction->hover   != next_interaction->hover   ||
+             prev_interaction->pressed != next_interaction->pressed ||
+             prev_interaction->focus   != next_interaction->focus);
+        if (!interaction_changed) return {};
+
+        std::vector<Rect> raw;
+        add_interaction_rects(prev, next, prev_interaction->hover,  next_interaction->hover,  raw);
+        add_interaction_rects(prev, next, prev_interaction->pressed, next_interaction->pressed, raw);
+        add_interaction_rects(prev, next, prev_interaction->focus,  next_interaction->focus,  raw);
+        if (raw.empty()) return raw;
+        merge_overlapping(raw);
+        if (raw.size() > max_rects) return std::vector<Rect>{full};
+        for (auto& r : raw) inflate(r, kAAInflate);
+        return raw;
+    }
+
     std::vector<Rect> raw;
     diff_subtree(prev, next, raw);
 

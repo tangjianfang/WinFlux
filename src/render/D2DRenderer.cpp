@@ -55,6 +55,10 @@ void D2DRenderer::resize(unsigned width_px, unsigned height_px) noexcept {
 
 void D2DRenderer::set_dpi(float dpi) noexcept {
     dpi_ = dpi > 0.0f ? dpi : 96.0f;
+    // New DPI -> the cached world transform is stale; force next begin() to
+    // reapply SetTransform even if every other input (offset, physLeft/Top)
+    // happens to coincide.
+    transform_dirty_ = true;
     if (presenter_ != nullptr) presenter_->set_dpi(dpi_);
 }
 
@@ -72,6 +76,9 @@ void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
         brushes_.clear();
         text_layouts_.clear();   // IDWriteTextLayout holds the dwrite factory; safe to keep, but rebind to new format pointer if we ever cache that.
         last_rt_ = frame_rt_;   // AddRefs; releases the previous (possibly dead) RT
+        // The new RT starts with the identity transform; any cached transform
+        // state from the old (now-dead) RT doesn't carry over.
+        transform_dirty_ = true;
     }
 
     frame_offset_x_ = frame.offsetX;
@@ -83,11 +90,30 @@ void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
     // composition coord (physLeft - offsetX, physTop - offsetY), so we add
     // (offsetX - physLeft) to translate logical→DXGI. For a full repaint
     // offsetX == physLeft == 0 and this reduces to plain Scale(dpi/96).
+    //
+    // The transform is only re-applied when one of its inputs actually
+    // changed. For HwndPresenter (offset == 0, single-surface RT) the
+    // transform is constant across frames after the first DPI init; the
+    // DCompPresenter path still re-applies every frame because the offset
+    // varies per dirty-rect sub-allocation.
     const float tx = static_cast<float>(frame.offsetX) - static_cast<float>(frame.physLeft);
     const float ty = static_cast<float>(frame.offsetY) - static_cast<float>(frame.physTop);
-    frame_rt_->SetTransform(
-        D2D1::Matrix3x2F::Scale(dpi_ / 96.0f, dpi_ / 96.0f) *
-        D2D1::Matrix3x2F::Translation(tx, ty));
+    if (transform_dirty_ ||
+        dpi_ != last_transform_dpi_ ||
+        frame.offsetX != last_transform_offset_x_ ||
+        frame.offsetY != last_transform_offset_y_ ||
+        frame.physLeft != last_transform_phys_left_ ||
+        frame.physTop != last_transform_phys_top_) {
+        frame_rt_->SetTransform(
+            D2D1::Matrix3x2F::Scale(dpi_ / 96.0f, dpi_ / 96.0f) *
+            D2D1::Matrix3x2F::Translation(tx, ty));
+        last_transform_dpi_ = dpi_;
+        last_transform_offset_x_ = frame.offsetX;
+        last_transform_offset_y_ = frame.offsetY;
+        last_transform_phys_left_ = frame.physLeft;
+        last_transform_phys_top_ = frame.physTop;
+        transform_dirty_ = false;
+    }
 
     // Constrain drawing to the dirty region so a sub-allocated composition
     // surface is never written outside the requested update rect. PushAxis-

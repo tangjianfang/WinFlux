@@ -78,6 +78,33 @@ namespace {
 constexpr wchar_t kClassName[] = L"WinFluxHost";
 
 float ease_in_out(float t) noexcept { return t * t * (3.0f - 2.0f * t); }
+
+// RAII guard for the painting_ re-entrancy flag. paint_frame is noexcept but
+// wndproc catches any exception at the boundary; this guarantees the flag
+// resets on every exit path (gen-check early-return, dirty_rects.empty()
+// return, normal completion, or a throw) without scattering `painting_ = false`
+// at each return site.
+struct PaintScope {
+    bool& flag;
+    explicit PaintScope(bool& f) noexcept : flag(f) { flag = true; }
+    ~PaintScope() noexcept { flag = false; }
+    PaintScope(const PaintScope&) = delete;
+    PaintScope& operator=(const PaintScope&) = delete;
+};
+
+#ifdef _DEBUG
+// Inline QueryPerformanceCounter helper; one source for the cast so the
+// rest of the code reads as `qpc()` -> long long.
+inline long long qpc() noexcept {
+    LARGE_INTEGER t{};
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+inline double qpc_to_ms(long long freq, long long delta) noexcept {
+    return freq > 0 ? (static_cast<double>(delta) * 1000.0 / static_cast<double>(freq))
+                    : 0.0;
+}
+#endif
 } // namespace
 
 LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept {
@@ -209,6 +236,10 @@ void Host::set_root_builder(std::function<ElementPtr()> builder) noexcept {
 }
 
 void Host::request_render() noexcept {
+    // Bump BEFORE the painting_ guard so a state mutation fired from inside
+    // a click handler (which runs with painting_ == true and would otherwise
+    // early-return here) still invalidates the next paint_frame's baseline.
+    (void)bump_generation();
     if (hwnd_ == nullptr || painting_) return;
     paint_frame();   // drive the presenter directly (no InvalidateRect round-trip)
     if (hwnd_ != nullptr) ValidateRect(hwnd_, nullptr);   // clear dirty; avoid a double WM_PAINT
@@ -452,12 +483,33 @@ void Host::handle_key_down(WPARAM vk) noexcept {
 
 void Host::paint_frame() noexcept {
     if (painting_ || !renderer_.valid()) return;
-    painting_ = true;
+    // Short-circuit: if nothing has invalidated the scene since the last paint
+    // (and we don't owe a forced full repaint or a fade-interpolation frame),
+    // the DComp surface is still correct. Skipping avoids running the builder,
+    // flex_layout, and DamageTracker on stray WM_PAINTs that arrive between
+    // state mutations (window uncover, drag, etc.).
+    if (dirty_generation_ == last_painted_generation_ && !force_full_dirty_ && !fading_) {
+        return;
+    }
+    PaintScope scope(painting_);
+
+#ifdef _DEBUG
+    if (qpc_freq_ == 0) {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        qpc_freq_ = f.QuadPart;
+    }
+    const long long t_frame_start = qpc();
+#endif
 
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     const float logical_w = to_logical_px(rc.right - rc.left);
     const float logical_h = to_logical_px(rc.bottom - rc.top);
+
+#ifdef _DEBUG
+    const long long t_after_rect = qpc();
+#endif
 
     // Rebuild the scene tree (React re-render).
     tree_ = root_builder_ ? root_builder_() : nullptr;
@@ -473,6 +525,10 @@ void Host::paint_frame() noexcept {
         };
         flex_layout(*tree_, logical_w, logical_h, ctx);
     }
+
+#ifdef _DEBUG
+    const long long t_after_layout = qpc();
+#endif
 
     // Compute damage. resize / DPI change / theme fade in progress force a
     // fullscreen update; otherwise diff prev_tree_ against the new tree and
@@ -496,11 +552,21 @@ void Host::paint_frame() noexcept {
     }
     force_full_dirty_ = false;
 
+#ifdef _DEBUG
+    const long long t_after_damage = qpc();
+#endif
+
     if (dirty_rects.empty()) {
         // Nothing changed; the composition visual is already correct. Do NOT
         // advance prev_tree_ / prev_*_path_ here — the next frame's diff
-        // baseline must remain the last frame that actually drew.
-        painting_ = false;
+        // baseline must remain the last frame that actually drew. But DO
+        // advance last_painted_generation_ so the gen short-circuit above
+        // catches subsequent stray WM_PAINTs without re-running the diff.
+        last_painted_generation_ = dirty_generation_;
+#ifdef _DEBUG
+        t_total_ += qpc() - t_frame_start;
+        if (++frame_counter_ >= kFrameTimingInterval) { log_frame_summary(); }
+#endif
         return;
     }
 
@@ -508,6 +574,9 @@ void Host::paint_frame() noexcept {
     // BeginDraw can target the actual changed region. render_element prunes
     // subtrees whose bounds don't intersect the dirty rect, so a partial
     // repaint only visits the elements that actually need new pixels.
+#ifdef _DEBUG
+    const long long t_before_draw = qpc();
+#endif
     for (const Rect& dr : dirty_rects) {
         renderer_.begin(shown_.background, &dr);
         if (tree_ != nullptr) render_element(*tree_, Path{}, dr);
@@ -520,9 +589,44 @@ void Host::paint_frame() noexcept {
     prev_hover_path_   = hover_path_;
     prev_pressed_path_ = pressed_path_;
     prev_focus_path_   = focus_path_;
+    last_painted_generation_ = dirty_generation_;
 
-    painting_ = false;
+#ifdef _DEBUG
+    const long long t_end = qpc();
+    t_total_   += t_end - t_frame_start;
+    t_builder_ += t_after_rect - t_frame_start;          // GetClientRect + tree build
+    t_layout_  += t_after_layout - t_after_rect;
+    t_damage_  += t_after_damage - t_after_layout;
+    t_draw_    += t_end - t_before_draw;
+    if (++frame_counter_ >= kFrameTimingInterval) { log_frame_summary(); }
+#endif
 }
+
+#ifdef _DEBUG
+void Host::log_frame_summary() noexcept {
+    // Per-frame averages in milliseconds. builder includes GetClientRect since
+    // it's a cheap pre-pass and not separately useful.
+    const double total_ms  = qpc_to_ms(qpc_freq_, t_total_);
+    const double build_ms  = qpc_to_ms(qpc_freq_, t_builder_);
+    const double layout_ms = qpc_to_ms(qpc_freq_, t_layout_);
+    const double damage_ms = qpc_to_ms(qpc_freq_, t_damage_);
+    const double draw_ms   = qpc_to_ms(qpc_freq_, t_draw_);
+    const double avg_total = frame_counter_ > 0 ? total_ms / frame_counter_ : 0.0;
+    const double avg_build = frame_counter_ > 0 ? build_ms / frame_counter_ : 0.0;
+    const double avg_layout= frame_counter_ > 0 ? layout_ms/ frame_counter_ : 0.0;
+    const double avg_damage= frame_counter_ > 0 ? damage_ms/ frame_counter_ : 0.0;
+    const double avg_draw  = frame_counter_ > 0 ? draw_ms  / frame_counter_ : 0.0;
+
+    wchar_t buf[256];
+    std::swprintf(buf, std::size(buf),
+                  L"[WinFlux] %u frames: total=%.3fms build=%.3f layout=%.3f damage=%.3f draw=%.3f\n",
+                  frame_counter_, avg_total, avg_build, avg_layout, avg_damage, avg_draw);
+    OutputDebugStringW(buf);
+
+    t_total_ = t_builder_ = t_layout_ = t_damage_ = t_draw_ = 0;
+    frame_counter_ = 0;
+}
+#endif
 
 void Host::render_element(const Element& e, const Path& path, const Rect& clip) noexcept {
     const Props& p = e.props;

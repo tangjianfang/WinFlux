@@ -63,6 +63,18 @@ private:
     Microsoft::WRL::ComPtr<ID2D1RenderTarget> last_rt_;  // device-lost cache invalidation
     int frame_offset_x_ = 0;
     int frame_offset_y_ = 0;
+    // Cached values for the world transform last applied via SetTransform.
+    // The transform is `Scale(dpi/96) * Translation(offsetX - physLeft, ...)`;
+    // for HwndPresenter the offset is always zero so the transform only
+    // changes on DPI change, and we can skip the per-frame SetTransform call.
+    // For DCompPresenter the offset varies per dirty rect, so this just
+    // degenerates into the original "always set" behaviour.
+    float last_transform_dpi_ = 0.0f;
+    int last_transform_offset_x_ = 0;
+    int last_transform_offset_y_ = 0;
+    int last_transform_phys_left_ = 0;
+    int last_transform_phys_top_ = 0;
+    bool transform_dirty_ = true;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>> brushes_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextFormat>> formats_;

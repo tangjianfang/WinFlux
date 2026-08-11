@@ -109,11 +109,10 @@ private:
     // Order matters: C++ destroys members in reverse declaration order, so the
     // presenters must outlive the renderer. D2DRenderer's destructor releases
     // the render target whose device is owned by whichever presenter is live;
-// violating that ordering during teardown is undefined behaviour.
-DCompPresenter dcomp_presenter_;   // default path
-HwndPresenter hwnd_presenter_;      // fallback when DComp creation fails
-IPresenter* presenter_ = nullptr;   // points at whichever presenter is live
-D2DRenderer renderer_;
+    // violating that ordering during teardown is undefined behaviour.
+    DCompPresenter dcomp_presenter_;   // default path
+    HwndPresenter hwnd_presenter_;      // fallback when DComp creation fails
+    IPresenter* presenter_ = nullptr;   // points at whichever presenter is live
     DamageTracker damage_tracker_;      // Phase 2 diff for partial repaint
     bool painting_ = false;             // re-entrancy guard for direct-draw
     bool force_full_dirty_ = false;     // resize/DPI/theme-fade => fullscreen dirty
@@ -122,6 +121,18 @@ D2DRenderer renderer_;
     HINSTANCE instance_ = nullptr;
     std::function<ElementPtr()> root_builder_;
     ElementPtr tree_;
+
+    // Bumped whenever something might have invalidated the rendered scene.
+    // paint_frame compares this against last_painted_generation_; if they
+    // match, the frame is a true no-op (no builder, no layout, no diff, no
+    // draw) and we can skip everything. State::set, request_render, resize,
+    // DPI change, theme fade, and the interaction handlers all bump it.
+    using Generation = unsigned long long;
+    // Sentinel ensures the first paint_frame() never matches (last != gen)
+    // and so always runs the full pipeline.
+    Generation dirty_generation_ = 0;
+    Generation last_painted_generation_ = ~Generation{0};
+    [[nodiscard]] Generation bump_generation() noexcept { return ++dirty_generation_; }
 
     ThemeMode mode_ = ThemeMode::light;
     Palette shown_{};         // palette currently displayed (fade-interpolated)
@@ -141,8 +152,30 @@ D2DRenderer renderer_;
     Path prev_focus_path_;
     bool mouse_tracking_ = false;
 
+    // Declared last → destroyed first → releases its render target before the
+    // presenter's device is torn down (renderer_ relies on presenter_'s
+    // device for ID2D1RenderTarget creation).
+    D2DRenderer renderer_;
+
     static constexpr UINT_PTR fade_timer_id_ = 1;
     static constexpr unsigned int fade_tick_ms_ = 16;
+
+#ifdef _DEBUG
+    // ---- Frame-timing instrumentation (debug builds only) -----------------
+    // Per-phase QueryPerformanceCounter deltas + rolling frame counter; every
+    // kFrameTimingInterval frames we emit a one-line summary to the debugger
+    // so a frame-time regression shows up without attaching a profiler. The
+    // members are #ifdef'd out in release so there is no overhead.
+    long long qpc_freq_ = 0;
+    unsigned frame_counter_ = 0;
+    long long t_total_ = 0;
+    long long t_builder_ = 0;
+    long long t_layout_ = 0;
+    long long t_damage_ = 0;
+    long long t_draw_ = 0;
+    static constexpr unsigned kFrameTimingInterval = 120;   // ~2s @60fps
+    void log_frame_summary() noexcept;
+#endif
 };
 
 } // namespace flux
