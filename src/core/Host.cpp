@@ -171,7 +171,6 @@ bool Host::create(const Config& config, HINSTANCE instance) noexcept {
         const DWORD err = GetLastError();
         if (err != ERROR_CLASS_ALREADY_EXISTS) return false;
     }
-    registered_class_ = true;
 
     // Logical-to-physical at creation: config sizes are logical (96 DPI).
     RECT rc{0, 0, config.width, config.height};
@@ -193,6 +192,10 @@ bool Host::create(const Config& config, HINSTANCE instance) noexcept {
         return false;
     }
     renderer_.attach(*presenter_);
+    // Initialize DPI at the create-time monitor DPI. Without this the renderer
+    // paints at 96 DPI until the first WM_DPICHANGED arrives — which on most
+    // machines is never (DPI only changes when the source monitor changes).
+    renderer_.set_dpi(static_cast<float>(GetDpiForWindow(hwnd)));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     return true;
@@ -277,6 +280,11 @@ bool Host::is_prefix(const Path& prefix, const Path& full) noexcept {
     return true;
 }
 
+bool Host::rects_intersect(const Rect& a, const Rect& b) noexcept {
+    return a.x < b.x + b.w && b.x < a.x + a.w &&
+           a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
 const Element* Host::hit_test(float lx, float ly, Path& path) const noexcept {
     if (tree_ == nullptr || !contains(*tree_, lx, ly)) return nullptr;
 
@@ -328,6 +336,9 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     (void)hit_test(to_logical_px(px), to_logical_px(py), path);
     if (path != hover_path_) {
         hover_path_ = std::move(path);
+        // Hover highlight is applied at render time from hover_path_ and is not
+        // encoded in the element tree; the damage diff is fed the OLD and NEW
+        // paths in paint_frame so this becomes a partial repaint.
         request_render();
     }
 }
@@ -336,27 +347,37 @@ void Host::handle_mouse_leave() noexcept {
     mouse_tracking_ = false;
     if (!hover_path_.empty()) {
         hover_path_.clear();
-        request_render();
+        request_render();   // drop the stale hover highlight
     }
 }
 
 void Host::handle_lbutton_down(int px, int py) noexcept {
     Path path;
     const Element* target = hit_test(to_logical_px(px), to_logical_px(py), path);
-    if (target == nullptr) return;
-
-    // Walk up: an interactive ancestor owns the press (label inside button).
-    Path walk = path;
-    while (!walk.empty()) {
-        if (const Element* e = resolve(walk); e != nullptr && e->props.on_click && e->props.enabled) {
-            pressed_path_ = walk;
-            focus_path_ = walk;
-            break;
+    Path new_focus;
+    Path new_pressed;
+    if (target != nullptr) {
+        // Walk up: an interactive ancestor owns the press (label inside button).
+        Path walk = path;
+        while (!walk.empty()) {
+            if (const Element* e = resolve(walk); e != nullptr && e->props.on_click && e->props.enabled) {
+                new_pressed = walk;
+                new_focus = walk;
+                break;
+            }
+            walk.pop_back();
         }
-        walk.pop_back();
     }
-    if (hwnd_ != nullptr) SetCapture(hwnd_);
-    request_render();
+    // Background click clears focus (target == nullptr OR no interactive
+    // ancestor); keyboard activation on a now-blank focus path doesn't work
+    // but matches Win32 tabbing behaviour: clicking outside any focusable
+    // element drops focus.
+    if (new_focus != focus_path_ || new_pressed != pressed_path_) {
+        focus_path_ = std::move(new_focus);
+        pressed_path_ = std::move(new_pressed);
+        if (hwnd_ != nullptr && !pressed_path_.empty()) SetCapture(hwnd_);
+        request_render();
+    }
 }
 
 void Host::handle_lbutton_up(int px, int py) noexcept {
@@ -364,7 +385,9 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
     if (pressed_path_.empty()) return;
 
     Path under;
-    const Element* up_target = hit_test(to_logical_px(px), to_logical_px(py), under);
+    (void)hit_test(to_logical_px(px), to_logical_px(py), under);
+    // Walk up from the release point and check whether the pressed element is
+    // still an ancestor — that's the Win32 click semantics.
     Path walk = under;
     bool inside = false;
     while (!walk.empty()) {
@@ -375,11 +398,14 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
         walk.pop_back();
     }
 
+    // Capture path BEFORE clearing — resolve() walks the live tree and the
+    // handler below may trigger a rebuild that invalidates any previously
+    // cached pointer. Holding the path keeps the click target stable.
     const Path fired = pressed_path_;
     pressed_path_.clear();
-    request_render();
+    request_render();   // drop the pressed highlight via partial diff
 
-    if (inside && up_target != nullptr) {
+    if (inside) {
         if (const Element* e = resolve(fired);
             e != nullptr && e->props.on_click && e->props.enabled) {
             // The handler may mutate state -> rebuild happens next frame.
@@ -405,15 +431,17 @@ void Host::handle_key_down(WPARAM vk) noexcept {
         }
         index = shift ? (index + order.size() - 1) % order.size()
                       : (index + 1) % order.size();
-        focus_path_ = order[index];
-        request_render();
+        if (focus_path_ != order[index]) {
+            focus_path_ = order[index];
+            request_render();   // focus ring moved — partial diff covers it
+        }
         return;
     }
 
     if (vk == VK_SPACE || vk == VK_RETURN) {
         if (const Element* e = resolve(focus_path_);
             e != nullptr && e->props.on_click && e->props.enabled) {
-            e->props.on_click();
+            e->props.on_click();   // handler-driven render; no force_full_dirty
         }
     }
 }
@@ -447,7 +475,14 @@ void Host::paint_frame() noexcept {
     }
 
     // Compute damage. resize / DPI change / theme fade in progress force a
-    // fullscreen update; otherwise diff prev_tree_ against the new tree.
+    // fullscreen update; otherwise diff prev_tree_ against the new tree and
+    // also fold in interaction-state changes (hover/press/focus) that the
+    // structural diff can't see.
+    DamageTracker::InteractionState prev_interaction{
+        prev_hover_path_, prev_pressed_path_, prev_focus_path_};
+    DamageTracker::InteractionState next_interaction{
+        hover_path_, pressed_path_, focus_path_};
+
     std::vector<Rect> dirty_rects;
     if (force_full_dirty_ || fading_) {
         if (logical_w > 0.0f && logical_h > 0.0f) {
@@ -455,36 +490,52 @@ void Host::paint_frame() noexcept {
         }
     } else {
         dirty_rects = damage_tracker_.compute(prev_tree_.get(), tree_.get(),
-                                              logical_w, logical_h);
+                                              logical_w, logical_h,
+                                              &prev_interaction,
+                                              &next_interaction);
     }
     force_full_dirty_ = false;
-    prev_tree_ = tree_;
 
     if (dirty_rects.empty()) {
+        // Nothing changed; the composition visual is already correct. Do NOT
+        // advance prev_tree_ / prev_*_path_ here — the next frame's diff
+        // baseline must remain the last frame that actually drew.
         painting_ = false;
-        return;   // nothing changed; the composition visual is already correct
+        return;
     }
 
-    // Collapse the dirty set to a single bounding rect for the Presenter.
-    Rect dr = dirty_rects[0];
-    for (size_t i = 1; i < dirty_rects.size(); ++i) {
-        const float x1 = std::min(dr.x, dirty_rects[i].x);
-        const float y1 = std::min(dr.y, dirty_rects[i].y);
-        const float x2 = std::max(dr.x + dr.w, dirty_rects[i].x + dirty_rects[i].w);
-        const float y2 = std::max(dr.y + dr.h, dirty_rects[i].y + dirty_rects[i].h);
-        dr = Rect{x1, y1, x2 - x1, y2 - y1};
+    // Iterate each dirty rect separately so the Presenter's sub-allocated
+    // BeginDraw can target the actual changed region. render_element prunes
+    // subtrees whose bounds don't intersect the dirty rect, so a partial
+    // repaint only visits the elements that actually need new pixels.
+    for (const Rect& dr : dirty_rects) {
+        renderer_.begin(shown_.background, &dr);
+        if (tree_ != nullptr) render_element(*tree_, Path{}, dr);
+        renderer_.end();
     }
 
-    renderer_.begin(shown_.background, &dr);
-    if (tree_ != nullptr) render_element(*tree_, Path{});
-    renderer_.end();
+    // Snapshots advance AFTER a real draw, so a frame that produced no dirty
+    // rects preserves the true previous baseline for the next diff.
+    prev_tree_ = tree_;
+    prev_hover_path_   = hover_path_;
+    prev_pressed_path_ = pressed_path_;
+    prev_focus_path_   = focus_path_;
 
     painting_ = false;
 }
 
-void Host::render_element(const Element& e, const Path& path) noexcept {
+void Host::render_element(const Element& e, const Path& path, const Rect& clip) noexcept {
     const Props& p = e.props;
     const Rect r{e.x, e.y, e.w, e.h};
+
+    // Cull subtrees outside the dirty rect. For a small partial repaint this
+    // avoids walking the entire scene tree; for a fullscreen dirty rect
+    // (clip covers everything) the test always passes. An element whose
+    // bounds don't intersect the clip can still affect rendering if its
+    // children do — but children are clipped to the parent container in the
+    // DOM-equivalent sense, so we only descend when the parent intersects.
+    if (!rects_intersect(r, clip)) return;
+
     const bool hovered = is_prefix(path, hover_path_) && !path.empty();
     const bool pressed = path == pressed_path_;
     const bool focused = path == focus_path_;
@@ -551,7 +602,7 @@ void Host::render_element(const Element& e, const Path& path) noexcept {
     for (size_t i = 0; i < e.children.size(); ++i) {
         Path child_path = path;
         child_path.push_back(static_cast<int>(i));
-        render_element(*e.children[i], child_path);
+        render_element(*e.children[i], child_path, clip);
     }
 }
 

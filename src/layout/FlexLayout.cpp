@@ -1,6 +1,7 @@
 #include <flux/FlexLayout.hpp>
 
 #include <algorithm>
+#include <unordered_map>
 
 namespace flux {
 
@@ -10,47 +11,63 @@ constexpr float kMinSize = 0.0f;
 
 bool is_leaf(const Element& e) noexcept { return e.children.empty(); }
 
-// Recursive content measurement (logical px). Leaves consult the text
-// measurer; containers sum their children along their own main axis.
-std::pair<float, float> measure(const Element& e, const LayoutContext& ctx) noexcept {
+// Per-node measure cache. Keys by Element address — valid for the duration of
+// a single flex_layout call because the tree isn't mutated mid-pass. Caches
+// the (main, cross) intrinsic pair so cross-axis lookups in the same pass
+// don't trigger another recursive measure of the same subtree.
+using MeasureKey = const Element*;
+struct MeasureValue { float main; float cross; };
+using MeasureCache = std::unordered_map<MeasureKey, MeasureValue>;
+
+std::pair<float, float> measure_impl(const Element& e, const LayoutContext& ctx,
+                                     MeasureCache& cache) noexcept {
+    const auto it = cache.find(&e);
+    if (it != cache.end()) return {it->second.main, it->second.cross};
+
     const EdgeInsets& pad = e.props.padding;
+    std::pair<float, float> result;
     if (is_leaf(e)) {
         auto [tw, th] = ctx.measure_leaf ? ctx.measure_leaf(e) : std::pair<float, float>{0.0f, 0.0f};
-        return {tw + pad.left + pad.right, th + pad.top + pad.bottom};
+        result = {tw + pad.left + pad.right, th + pad.top + pad.bottom};
+    } else {
+        float main = 0.0f;
+        float cross = 0.0f;
+        const bool row = e.props.direction == Direction::row;
+        const float gap = e.props.gap;
+        for (size_t i = 0; i < e.children.size(); ++i) {
+            const Element& c = *e.children[i];
+            const EdgeInsets& m = c.props.margin;
+            auto [cw, ch] = measure_impl(c, ctx, cache);
+            const float cmain = row ? cw + m.left + m.right : ch + m.top + m.bottom;
+            const float ccross = row ? ch + m.top + m.bottom : cw + m.left + m.right;
+            main += cmain + (i > 0 ? gap : 0.0f);
+            cross = std::max(cross, ccross);
+        }
+        result = row ? std::pair{main + pad.left + pad.right, cross + pad.top + pad.bottom}
+                     : std::pair{cross + pad.left + pad.right, main + pad.top + pad.bottom};
     }
-
-    float main = 0.0f;
-    float cross = 0.0f;
-    const bool row = e.props.direction == Direction::row;
-    const float gap = e.props.gap;
-    for (size_t i = 0; i < e.children.size(); ++i) {
-        const Element& c = *e.children[i];
-        const EdgeInsets& m = c.props.margin;
-        auto [cw, ch] = measure(c, ctx);
-        const float cmain = row ? cw + m.left + m.right : ch + m.top + m.bottom;
-        const float ccross = row ? ch + m.top + m.bottom : cw + m.left + m.right;
-        main += cmain + (i > 0 ? gap : 0.0f);
-        cross = std::max(cross, ccross);
-    }
-    return row ? std::pair{main + pad.left + pad.right, cross + pad.top + pad.bottom}
-               : std::pair{cross + pad.left + pad.right, main + pad.top + pad.bottom};
+    cache.emplace(&e, MeasureValue{result.first, result.second});
+    return result;
 }
 
-float fixed_or_content_main(const Element& e, bool row, const LayoutContext& ctx) noexcept {
+float fixed_or_content_main(const Element& e, bool row, const LayoutContext& ctx,
+                            MeasureCache& cache) noexcept {
     const auto& fixed = row ? e.props.width : e.props.height;
     if (fixed.has_value()) return *fixed;
-    auto [mw, mh] = measure(e, ctx);
+    auto [mw, mh] = measure_impl(e, ctx, cache);
     return row ? mw : mh;
 }
 
-float fixed_or_content_cross(const Element& e, bool row, const LayoutContext& ctx) noexcept {
+float fixed_or_content_cross(const Element& e, bool row, const LayoutContext& ctx,
+                             MeasureCache& cache) noexcept {
     const auto& fixed = row ? e.props.height : e.props.width;
     if (fixed.has_value()) return *fixed;
-    auto [mw, mh] = measure(e, ctx);
+    auto [mw, mh] = measure_impl(e, ctx, cache);
     return row ? mh : mw;
 }
 
-void layout_node(Element& e, float ox, float oy, float w, float h, const LayoutContext& ctx) noexcept {
+void layout_node(Element& e, float ox, float oy, float w, float h,
+                 const LayoutContext& ctx, MeasureCache& cache) noexcept {
     e.x = ox;
     e.y = oy;
     e.w = w;
@@ -75,7 +92,7 @@ void layout_node(Element& e, float ox, float oy, float w, float h, const LayoutC
         Element& c = *e.children[i];
         const EdgeInsets& m = c.props.margin;
         const float margin_main = row ? m.left + m.right : m.top + m.bottom;
-        mains[i] = std::max(kMinSize, fixed_or_content_main(c, row, ctx) + margin_main);
+        mains[i] = std::max(kMinSize, fixed_or_content_main(c, row, ctx, cache) + margin_main);
         total += mains[i];
         grow_sum += c.props.flex_grow;
     }
@@ -107,7 +124,7 @@ void layout_node(Element& e, float ox, float oy, float w, float h, const LayoutC
         const float cross_avail = avail_cross - margin_cross_start - margin_cross_end;
         const float cross_size = stretch
             ? std::max(kMinSize, cross_avail)
-            : std::max(kMinSize, fixed_or_content_cross(c, row, ctx));
+            : std::max(kMinSize, fixed_or_content_cross(c, row, ctx, cache));
 
         const float main_pos = cursor + margin_main_start;
         float cross_pos = margin_cross_start;
@@ -128,7 +145,7 @@ void layout_node(Element& e, float ox, float oy, float w, float h, const LayoutC
         const float child_y = row ? cy + cross_pos : cy + main_pos;
         const float child_w = row ? main_size : cross_size;
         const float child_h = row ? cross_size : main_size;
-        layout_node(c, child_x, child_y, child_w, child_h, ctx);
+        layout_node(c, child_x, child_y, child_w, child_h, ctx, cache);
 
         cursor += mains[i] + p.gap;
     }
@@ -137,7 +154,8 @@ void layout_node(Element& e, float ox, float oy, float w, float h, const LayoutC
 } // namespace
 
 void flex_layout(Element& root, float width, float height, const LayoutContext& ctx) noexcept {
-    layout_node(root, 0.0f, 0.0f, width, height, ctx);
+    MeasureCache cache;
+    layout_node(root, 0.0f, 0.0f, width, height, ctx, cache);
 }
 
 } // namespace flux

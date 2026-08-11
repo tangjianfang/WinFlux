@@ -66,6 +66,14 @@ private:
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>> brushes_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextFormat>> formats_;
+    // Per-(text,format) IDWriteTextLayout cache, keyed by a 64-bit hash that
+    // mixes the format key with the text pointer/size. measure_text reuses
+    // the same layout across frames so long as the text and format haven't
+    // changed — every leaf measurement would otherwise allocate a fresh
+    // layout, which dominates the cost of partial-repaint frames with many
+    // labels. Bounded by the number of distinct (text, format) pairs the
+    // app actually uses; for a typical UI this is O(few dozen).
+    std::unordered_map<unsigned long long, Microsoft::WRL::ComPtr<IDWriteTextLayout>> text_layouts_;
     float dpi_ = 96.0f;
     int clip_depth_ = 0;
 };

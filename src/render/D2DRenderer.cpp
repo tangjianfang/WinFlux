@@ -1,6 +1,7 @@
 #include <flux/D2DRenderer.hpp>
 
 #include <cmath>
+#include <cstring>
 
 namespace flux {
 
@@ -29,6 +30,7 @@ float pt_to_dip(float pt) noexcept { return pt * 96.0f / 72.0f; }
 D2DRenderer::~D2DRenderer() {
     brushes_.clear();
     formats_.clear();
+    text_layouts_.clear();
     dwrite_.Reset();
     last_rt_.Reset();
 }
@@ -68,6 +70,7 @@ void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
     // frame, brushes created from the dead target are invalid — drop them.
     if (last_rt_.Get() != frame_rt_) {
         brushes_.clear();
+        text_layouts_.clear();   // IDWriteTextLayout holds the dwrite factory; safe to keep, but rebind to new format pointer if we ever cache that.
         last_rt_ = frame_rt_;   // AddRefs; releases the previous (possibly dead) RT
     }
 
@@ -76,26 +79,42 @@ void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
 
     frame_rt_->BeginDraw();
     // World transform: logical (96 DPI) -> device px, then into the returned
-    // DXGI surface coordinate space (subtract the update offset). For a full
-    // repaint the offset is (0,0) so this reduces to the legacy Scale(dpi/96).
+    // DXGI surface coordinate space. The returned surface's top-left maps to
+    // composition coord (physLeft - offsetX, physTop - offsetY), so we add
+    // (offsetX - physLeft) to translate logical→DXGI. For a full repaint
+    // offsetX == physLeft == 0 and this reduces to plain Scale(dpi/96).
+    const float tx = static_cast<float>(frame.offsetX) - static_cast<float>(frame.physLeft);
+    const float ty = static_cast<float>(frame.offsetY) - static_cast<float>(frame.physTop);
     frame_rt_->SetTransform(
         D2D1::Matrix3x2F::Scale(dpi_ / 96.0f, dpi_ / 96.0f) *
-        D2D1::Matrix3x2F::Translation(-static_cast<float>(frame_offset_x_),
-                                     -static_cast<float>(frame_offset_y_)));
+        D2D1::Matrix3x2F::Translation(tx, ty));
 
     // Constrain drawing to the dirty region so a sub-allocated composition
-    // surface is never written outside the requested update rect. For a full
-    // repaint the clip covers the whole client area and is a no-op.
-    const Rect clip = (frame.dirty.w > 0.0f && frame.dirty.h > 0.0f)
-                          ? frame.dirty
-                          : Rect{0.0f, 0.0f, 1e6f, 1e6f};
-    frame_rt_->PushAxisAlignedClip(to_rect(clip), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    // surface is never written outside the requested update rect. PushAxis-
+    // AlignedClip is in the render target's local space (DXGI pixels, NOT
+    // affected by the world transform), so we must pass physical pixels here
+    // — frame.dirty is in logical units and would be off by `scale` plus an
+    // origin shift.
+    D2D1_RECT_F clip{};
+    if (frame.physWidth > 0 && frame.physHeight > 0) {
+        clip = D2D1::RectF(static_cast<float>(frame.physLeft),
+                           static_cast<float>(frame.physTop),
+                           static_cast<float>(frame.physLeft + frame.physWidth),
+                           static_cast<float>(frame.physTop + frame.physHeight));
+    } else {
+        clip = D2D1::RectF(0.0f, 0.0f, 1e6f, 1e6f);
+    }
+    frame_rt_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     ++clip_depth_;
 
     // Clear the dirty region to the background colour. For full repaint this
     // is equivalent to Clear() over the whole surface; for a partial repaint
     // it fills only the dirty rect (already clipped), preserving neighbours.
-    fill_rect(clip, clear);
+    // We pass logical units — SetTransform above will scale them into DXGI.
+    const Rect clip_logical = (frame.dirty.w > 0.0f && frame.dirty.h > 0.0f)
+                                  ? frame.dirty
+                                  : Rect{0.0f, 0.0f, 1e6f, 1e6f};
+    fill_rect(clip_logical, clear);
 }
 
 void D2DRenderer::end() noexcept {
@@ -194,14 +213,31 @@ std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
     IDWriteTextFormat* fmt = format(size_pt, bold);
     if (fmt == nullptr) return {0.0f, 0.0f};
 
-    // Unbounded width layout: the measured extent is the natural text size.
-    Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-    const HRESULT hr = dwrite_->CreateTextLayout(
-        text.c_str(), static_cast<UINT32>(text.size()), fmt,
-        100000.0f, 100000.0f, layout.GetAddressOf());
-    if (FAILED(hr)) return {0.0f, 0.0f};
+    // Key = (format bits) ^ (FNV-1a hash of text bytes). format_key already
+    // embeds size+bold; mixing in the text bytes gives a unique key per
+    // (text, size, bold) tuple. Hash quality is irrelevant — just needs to
+    // spread distinct strings across buckets.
+    const unsigned fk = format_key(size_pt, bold);
+    unsigned long long hash = 1469598103934665603ULL;   // FNV offset basis
+    for (wchar_t c : text) {
+        hash ^= static_cast<unsigned long long>(c);
+        hash *= 1099511628211ULL;   // FNV prime
+    }
+    const unsigned long long key = (static_cast<unsigned long long>(fk) << 32) ^ hash;
+
+    Microsoft::WRL::ComPtr<IDWriteTextLayout>& slot = text_layouts_[key];
+    if (slot == nullptr) {
+        // Unbounded width layout: the measured extent is the natural text size.
+        const HRESULT hr = dwrite_->CreateTextLayout(
+            text.c_str(), static_cast<UINT32>(text.size()), fmt,
+            100000.0f, 100000.0f, slot.GetAddressOf());
+        if (FAILED(hr)) {
+            text_layouts_.erase(key);
+            return {0.0f, 0.0f};
+        }
+    }
     DWRITE_TEXT_METRICS m{};
-    layout->GetMetrics(&m);
+    slot->GetMetrics(&m);
     return {std::ceil(m.width), std::ceil(m.height)};
 }
 

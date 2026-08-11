@@ -100,15 +100,20 @@ private:
     [[nodiscard]] const Element* hit_test(float lx, float ly, Path& path) const noexcept;
     [[nodiscard]] const Element* resolve(const Path& path) const noexcept;
     void collect_focusable(const Element& e, const Path& prefix, std::vector<Path>& out) const noexcept;
-    void render_element(const Element& e, const Path& path) noexcept;
+    void render_element(const Element& e, const Path& path, const Rect& clip) noexcept;
+    [[nodiscard]] static bool rects_intersect(const Rect& a, const Rect& b) noexcept;
 
     static bool contains(const Element& e, float lx, float ly) noexcept;
     static bool is_prefix(const Path& prefix, const Path& full) noexcept;
 
-    D2DRenderer renderer_;
-    DCompPresenter dcomp_presenter_;   // default path
-    HwndPresenter hwnd_presenter_;      // fallback when DComp creation fails
-    IPresenter* presenter_ = nullptr;   // points at whichever presenter is live
+    // Order matters: C++ destroys members in reverse declaration order, so the
+    // presenters must outlive the renderer. D2DRenderer's destructor releases
+    // the render target whose device is owned by whichever presenter is live;
+// violating that ordering during teardown is undefined behaviour.
+DCompPresenter dcomp_presenter_;   // default path
+HwndPresenter hwnd_presenter_;      // fallback when DComp creation fails
+IPresenter* presenter_ = nullptr;   // points at whichever presenter is live
+D2DRenderer renderer_;
     DamageTracker damage_tracker_;      // Phase 2 diff for partial repaint
     bool painting_ = false;             // re-entrancy guard for direct-draw
     bool force_full_dirty_ = false;     // resize/DPI/theme-fade => fullscreen dirty
@@ -128,8 +133,13 @@ private:
     Path hover_path_;
     Path pressed_path_;
     Path focus_path_;
+    // Snapshots of the above from the previous paint_frame, used to feed the
+    // damage diff so hover/press/focus changes produce partial repaints
+    // instead of being forced into a fullscreen update.
+    Path prev_hover_path_;
+    Path prev_pressed_path_;
+    Path prev_focus_path_;
     bool mouse_tracking_ = false;
-    bool registered_class_ = false;
 
     static constexpr UINT_PTR fade_timer_id_ = 1;
     static constexpr unsigned int fade_tick_ms_ = 16;
