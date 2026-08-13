@@ -16,6 +16,10 @@ using namespace flux;
 
 namespace {
 
+// Forward-declared so App's State<std::vector<ToastEntry>> member can name
+// it before the overlay helpers (which hold the full definition) appear.
+struct ToastEntry;
+
 struct App {
     Host host;
     State<int> count;
@@ -47,11 +51,18 @@ struct App {
     State<int> inbox_selected;        // selected message id, -1 = none
     State<bool> media_playing;
     State<float> media_volume;        // 0..100
+    // Phase E overlay & feedback state.
+    State<std::vector<ToastEntry>> toasts;
+    int next_toast_id = 0;
+    State<bool> modal_open;
+    State<bool> tooltip_visible;
+    State<std::wstring> tooltip_hint;
     // Top-level gallery navigation. The window can't fit every section
     // (twelve cards at full padding overflow the work area on most
     // monitors), so the body switches between four category tabs. Each
     // tab holds a small enough set to fit a 1000-px-tall window.
-    //   0 = Form controls, 1 = Pickers, 2 = Patterns, 3 = Mini-apps
+    //   0 = Form controls, 1 = Pickers, 2 = Patterns, 3 = Mini-apps,
+    //   4 = Overlays (Phase E feedback components)
     State<int> gallery_tab;
 };
 
@@ -953,6 +964,392 @@ ElementPtr alert(const Palette& pal, const wchar_t* kind, const wchar_t* text,
 }
 
 
+// ---- Phase E: Overlays & Feedback -------------------------------------------
+//
+// Toast / Modal / Tooltip / Badge. None of these need a new framework
+// element type — they're compositions of existing primitives plus host-side
+// State<T> for the open/close transitions. The point of Phase E is to show
+// that the framework composes into the standard "feedback" UI vocabulary:
+// notifications, dialogs, hover hints, and inline status pills.
+
+struct ToastEntry {
+    int id;
+    std::wstring text;
+    std::wstring kind;       // "info" | "success" | "warning" | "danger"
+};
+
+// Tiny inline pill. Used inside rows to mark items (counts, status, kind).
+// `kind` picks the colour scheme; default is the brand accent. Renders as a
+// label with a fully-rounded radius and horizontal padding so it looks like a
+// chip in a row of text.
+ElementPtr badge(const Palette& pal, const std::wstring& text,
+                 const wchar_t* kind = L"accent") {
+    Color bg = pal.accent;
+    Color fg = pal.on_accent;
+    if      (std::wcscmp(kind, L"success") == 0) { bg = pal.success; }
+    else if (std::wcscmp(kind, L"warning") == 0) { bg = pal.warning; }
+    else if (std::wcscmp(kind, L"danger")  == 0) { bg = pal.danger;  }
+    else if (std::wcscmp(kind, L"info")    == 0) { bg = pal.info;    }
+    else if (std::wcscmp(kind, L"neutral") == 0) { bg = pal.surface_variant; fg = pal.text_secondary; }
+
+    Props p;
+    p.background = bg;
+    p.text_color = fg;
+    p.padding = EdgeInsets{
+        static_cast<float>(tokens::spacing_sm),
+        static_cast<float>(tokens::spacing_xs),
+        static_cast<float>(tokens::spacing_sm),
+        static_cast<float>(tokens::spacing_xs)};
+    p.radius = 999.0f;
+    p.font_size_pt = tokens::font_caption;
+    return label(text, std::move(p));
+}
+
+// One toast card. The accent stripe on the left picks up the entry's kind
+// (the same palette role as the dot in the Inbox unread badges). The close
+// button is a square 24-px button with a subtle hover background so it reads
+// as a dismiss control, not as primary chrome.
+ElementPtr toast_bar(const Palette& pal, const ToastEntry& entry,
+                     ClickHandler on_close) {
+    Color accent = pal.info;
+    if      (entry.kind == L"success") accent = pal.success;
+    else if (entry.kind == L"warning") accent = pal.warning;
+    else if (entry.kind == L"danger")  accent = pal.danger;
+
+    Props outer_p;
+    outer_p.background = pal.surface;
+    outer_p.border_color = pal.border;
+    outer_p.border_width = 1.0f;
+    outer_p.radius = static_cast<float>(tokens::radius_card);
+    outer_p.padding = EdgeInsets{
+        static_cast<float>(tokens::spacing_md),
+        static_cast<float>(tokens::spacing_md),
+        static_cast<float>(tokens::spacing_md),
+        static_cast<float>(tokens::spacing_md)};
+    outer_p.direction = Direction::row;
+    outer_p.align = Align::center;
+    outer_p.gap = static_cast<float>(tokens::spacing_md);
+    auto outer = view(std::move(outer_p));
+
+    Props stripe_p;
+    stripe_p.background = accent;
+    stripe_p.width = 4.0f;
+    stripe_p.height = 32.0f;
+    stripe_p.radius = static_cast<float>(tokens::radius_sm);
+    outer->children.push_back(view(std::move(stripe_p)));
+
+    Props label_p;
+    label_p.text = entry.text;
+    label_p.text_color = pal.text;
+    label_p.font_size_pt = tokens::font_body;
+    label_p.text_align = Align::start;
+    label_p.flex_grow = 1.0f;
+    outer->children.push_back(label(entry.text, std::move(label_p)));
+
+    Props close_p;
+    close_p.text = L"×";
+    close_p.text_color = pal.text_secondary;
+    close_p.font_size_pt = tokens::font_subtitle;
+    close_p.text_align = Align::center;
+    close_p.width = 24.0f;
+    close_p.height = 24.0f;
+    close_p.radius = 12.0f;
+    close_p.hover_background = pal.surface_variant;
+    close_p.on_click = std::move(on_close);
+    outer->children.push_back(label(close_p.text, std::move(close_p)));
+
+    return outer;
+}
+
+// Modal dialog: a centred card with title, body, and a single Close action.
+// The Host has no z-order primitive, so this demo renders the modal as a
+// regular card that overlays the rest of the body content via being the
+// LAST child of root. No dimmed backdrop — the body content stays readable
+// behind the card; production modals would add a backdrop element that
+// captures clicks outside the card to dismiss.
+ElementPtr modal_card(const Palette& pal, const std::wstring& title,
+                      ElementPtr body, ClickHandler on_close) {
+    Props card_p;
+    card_p.background = pal.surface;
+    card_p.border_color = pal.border;
+    card_p.border_width = 1.0f;
+    card_p.radius = static_cast<float>(tokens::radius_lg);
+    card_p.padding = EdgeInsets{
+        static_cast<float>(tokens::spacing_lg),
+        static_cast<float>(tokens::spacing_lg),
+        static_cast<float>(tokens::spacing_lg),
+        static_cast<float>(tokens::spacing_lg)};
+    card_p.direction = Direction::column;
+    card_p.gap = static_cast<float>(tokens::spacing_md);
+    card_p.width = 480.0f;
+    auto card = view(std::move(card_p));
+
+    Props title_p;
+    title_p.text = title;
+    title_p.font_size_pt = tokens::font_title;
+    title_p.text_color = pal.text;
+    title_p.text_align = Align::start;
+    card->children.push_back(label(title, std::move(title_p)));
+
+    if (body) card->children.push_back(std::move(body));
+
+    Props actions_p;
+    actions_p.direction = Direction::row;
+    actions_p.align = Align::end;
+    actions_p.gap = static_cast<float>(tokens::spacing_md);
+    auto actions = view(std::move(actions_p));
+
+    Props close_p = button_secondary(pal);
+    close_p.text = L"Close";
+    close_p.on_click = on_close;
+    actions->children.push_back(button(L"Close", on_close, std::move(close_p)));
+    card->children.push_back(std::move(actions));
+
+    return card;
+}
+
+// Tooltip demo: a button that, on hover, reveals a popup with explanatory
+// text. The Host already tracks hover_path_, but per-element show/hide
+// timers need a delay before the popup appears (otherwise it flashes
+// during the cursor's transit). This demo omits the delay — the popup
+// shows immediately on hover via a State<bool> keyed off the button's
+// hover state. The Host doesn't expose a "hovered" flag on Props yet, so
+// we wire it through on_click toggling for visibility: each hover fires
+// a state flip. This is a simplification; a real tooltip would use a
+// render-element branch keyed off hover_path_.
+ElementPtr tooltip_demo(App& app, const Palette& pal,
+                        const std::wstring& label_text,
+                        const std::wstring& hint) {
+    // The State<bool> lives as a member of App; for the demo each tooltip
+    // reuses one slot via the index passed in via label suffix. Cleaner:
+    // allocate locally. Since App is rebuilt every frame, we keep the
+    // visibility in a per-tooltip slot keyed by an offset into App.
+    // For simplicity: track the last-hovered tooltip id in App.
+    Props trigger_p = button_secondary(pal);
+    trigger_p.text = label_text;
+    trigger_p.on_click = [&app, hint_copy = hint] {
+        // Click toggles a transient message that the host shows in the
+        // popup. The popup is rendered right below.
+        app.tooltip_hint.set(std::move(hint_copy));
+        app.tooltip_visible.set(true);
+    };
+    auto trigger = button(label_text, {}, std::move(trigger_p));
+
+    Props popup_p;
+    popup_p.background = pal.surface;
+    popup_p.border_color = pal.border;
+    popup_p.border_width = 1.0f;
+    popup_p.radius = static_cast<float>(tokens::radius_md);
+    popup_p.padding = EdgeInsets{
+        static_cast<float>(tokens::spacing_sm),
+        static_cast<float>(tokens::spacing_sm),
+        static_cast<float>(tokens::spacing_sm),
+        static_cast<float>(tokens::spacing_sm)};
+    popup_p.direction = Direction::row;
+    popup_p.align = Align::center;
+    popup_p.gap = static_cast<float>(tokens::spacing_sm);
+
+    Props popup_label_p;
+    popup_label_p.text = hint;
+    popup_label_p.text_color = pal.text_secondary;
+    popup_label_p.font_size_pt = tokens::font_caption;
+    popup_label_p.text_align = Align::start;
+
+    auto popup = view(std::move(popup_p));
+    popup->children.push_back(label(hint, std::move(popup_label_p)));
+
+    // Stack the trigger on top of the popup; the popup only shows when the
+    // State is true. Without a "visible" Props flag we conditionally
+    // include it in the tree.
+    ElementPtr popup_elt;
+    if (app.tooltip_visible.get()) {
+        popup_elt = std::move(popup);
+    } else {
+        Props empty_p;
+        empty_p.height = 0.0f;
+        popup_elt = view(std::move(empty_p));
+    }
+
+    Props col_p;
+    col_p.direction = Direction::column;
+    col_p.gap = static_cast<float>(tokens::spacing_xs);
+    col_p.align = Align::start;
+    auto col = view(std::move(col_p));
+    col->children.push_back(std::move(trigger));
+    col->children.push_back(std::move(popup_elt));
+    return col;
+}
+
+ElementPtr overlays_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    Props caption_p;
+    caption_p.text_color = pal.text_secondary;
+    caption_p.font_size_pt = tokens::font_caption;
+    caption_p.text_align = Align::start;
+
+    // ---- Toast demo ----
+    auto push_toast = [&](const std::wstring& kind, const std::wstring& text) {
+        auto v = app.toasts.get();
+        v.push_back({app.next_toast_id++, text, kind});
+        app.toasts.set(std::move(v));
+    };
+    // Captures by value (not [&]) so the resulting std::function can be
+    // copied into each toast_bar's on_click. The `app` reference is captured
+    // by reference but `app` outlives every toast (it's the long-lived host
+    // state), so this is safe.
+    std::function<void(int)> dismiss_toast = [&app](int id) {
+        auto v = app.toasts.get();
+        v.erase(std::remove_if(v.begin(), v.end(),
+            [id](const ToastEntry& e) { return e.id == id; }), v.end());
+        app.toasts.set(std::move(v));
+    };
+
+    Props info_btn_p = button_primary(pal);
+    info_btn_p.text = L"Info";
+    info_btn_p.on_click = [&] { push_toast(L"info", L"New message in your inbox."); };
+
+    Props success_btn_p = button_secondary(pal);
+    success_btn_p.text = L"Success";
+    success_btn_p.on_click = [&] { push_toast(L"success", L"Profile saved."); };
+
+    Props warning_btn_p = button_secondary(pal);
+    warning_btn_p.text = L"Warning";
+    warning_btn_p.on_click = [&] { push_toast(L"warning", L"Storage almost full."); };
+
+    Props danger_btn_p = button_secondary(pal);
+    danger_btn_p.text = L"Danger";
+    danger_btn_p.on_click = [&] { push_toast(L"danger", L"Failed to delete file."); };
+
+    auto toast_buttons = row_view({
+        button(L"Info",    [&] { push_toast(L"info",    L"New message in your inbox."); }, std::move(info_btn_p)),
+        button(L"Success", [&] { push_toast(L"success", L"Profile saved.");             }, std::move(success_btn_p)),
+        button(L"Warning", [&] { push_toast(L"warning", L"Storage almost full.");       }, std::move(warning_btn_p)),
+        button(L"Danger",  [&] { push_toast(L"danger",  L"Failed to delete file.");     }, std::move(danger_btn_p)),
+    }, static_cast<float>(tokens::spacing_sm), Align::start);
+
+    Props toast_stack_p;
+    toast_stack_p.direction = Direction::column;
+    toast_stack_p.gap = static_cast<float>(tokens::spacing_sm);
+    toast_stack_p.align = Align::stretch;
+    auto toast_stack = view(std::move(toast_stack_p));
+    auto entries = app.toasts.get();
+    if (entries.empty()) {
+        Props empty_p;
+        empty_p.text = L"No toasts yet — click a button above.";
+        empty_p.text_color = pal.text_secondary;
+        empty_p.font_size_pt = tokens::font_caption;
+        empty_p.text_align = Align::start;
+        toast_stack->children.push_back(label(empty_p.text, std::move(empty_p)));
+    } else {
+        for (const auto& entry : entries) {
+            int id = entry.id;
+            toast_stack->children.push_back(toast_bar(pal, entry,
+                [dismiss = dismiss_toast, id] { dismiss(id); }));
+        }
+    }
+
+    // ---- Modal demo ----
+    auto open_modal = [&app] { app.modal_open.set(true); };
+    auto close_modal = [&app] { app.modal_open.set(false); };
+
+    Props open_btn_p = button_primary(pal);
+    open_btn_p.text = L"Open modal";
+    open_btn_p.on_click = open_modal;
+
+    Props modal_body_p;
+    modal_body_p.text = L"This is a centred dialog. Click Close to dismiss.";
+    modal_body_p.text_color = pal.text;
+    modal_body_p.font_size_pt = tokens::font_body;
+    modal_body_p.text_align = Align::start;
+    auto modal_body = label(modal_body_p.text, std::move(modal_body_p));
+
+    ElementPtr modal_area;
+    if (app.modal_open.get()) {
+        Props wrapper_p;
+        wrapper_p.direction = Direction::column;
+        wrapper_p.gap = static_cast<float>(tokens::spacing_md);
+        wrapper_p.align = Align::stretch;
+        auto wrapper = view(std::move(wrapper_p));
+        wrapper->children.push_back(modal_card(pal, L"Confirm action",
+            std::move(modal_body), close_modal));
+        Props note_p;
+        note_p.text = L"Modal is open. The card above is the dialog.";
+        note_p.text_color = pal.text_secondary;
+        note_p.font_size_pt = tokens::font_caption;
+        note_p.text_align = Align::start;
+        wrapper->children.push_back(label(note_p.text, std::move(note_p)));
+        modal_area = std::move(wrapper);
+    } else {
+        Props trigger_row_p;
+        trigger_row_p.direction = Direction::row;
+        trigger_row_p.align = Align::start;
+        trigger_row_p.gap = static_cast<float>(tokens::spacing_md);
+        auto trigger_row = view(std::move(trigger_row_p));
+        trigger_row->children.push_back(
+            button(L"Open modal", open_modal, std::move(open_btn_p)));
+        modal_area = std::move(trigger_row);
+    }
+
+    // ---- Badge examples ----
+    Props badge_row_p;
+    badge_row_p.direction = Direction::row;
+    badge_row_p.gap = static_cast<float>(tokens::spacing_sm);
+    badge_row_p.align = Align::center;
+    auto badge_row = view(std::move(badge_row_p));
+    badge_row->children.push_back(badge(pal, L"3 unread",  L"info"));
+    badge_row->children.push_back(badge(pal, L"Saved",     L"success"));
+    badge_row->children.push_back(badge(pal, L"Pending",   L"warning"));
+    badge_row->children.push_back(badge(pal, L"Error",     L"danger"));
+    badge_row->children.push_back(badge(pal, L"Default",   L"accent"));
+    badge_row->children.push_back(badge(pal, L"Draft",     L"neutral"));
+
+    // ---- Tooltip demo ----
+    auto dismiss_tip = [&app] { app.tooltip_visible.set(false); };
+    auto tip1 = tooltip_demo(app, pal, L"Save",
+        L"Save your changes to disk (Ctrl+S).");
+    auto tip2 = tooltip_demo(app, pal, L"Delete",
+        L"Permanently delete the selected item.");
+    auto tip3 = tooltip_demo(app, pal, L"Settings",
+        L"Open application settings and preferences.");
+
+    Props tip_row_p;
+    tip_row_p.direction = Direction::row;
+    tip_row_p.gap = static_cast<float>(tokens::spacing_md);
+    tip_row_p.align = Align::start;
+    auto tip_row = view(std::move(tip_row_p));
+    tip_row->children.push_back(std::move(tip1));
+    tip_row->children.push_back(std::move(tip2));
+    tip_row->children.push_back(std::move(tip3));
+    // A small dismiss control so the tooltip popup can be cleared without
+    // clicking each button again.
+    Props dismiss_tip_p = button_secondary(pal);
+    dismiss_tip_p.text = L"Hide";
+    dismiss_tip_p.on_click = dismiss_tip;
+    Props dismiss_p;
+    dismiss_p.direction = Direction::row;
+    dismiss_p.align = Align::end;
+    auto dismiss_row = view(std::move(dismiss_p));
+    dismiss_row->children.push_back(
+        button(L"Hide hint", dismiss_tip, std::move(dismiss_tip_p)));
+    tip_row->children.push_back(std::move(dismiss_row));
+
+    auto body = col_view({
+        label(L"Badges",                         caption_p),
+        badge_row,
+        label(L"Toasts (click to push)",         caption_p),
+        toast_buttons,
+        toast_stack,
+        label(L"Modal dialog",                   caption_p),
+        modal_area,
+        label(L"Tooltips (click button to show hint)", caption_p),
+        tip_row,
+    }, static_cast<float>(tokens::spacing_md));
+
+    return section_card(L"Overlays & feedback", std::move(body), pal);
+}
+
+
 // ---- Mini-app: Settings -----------------------------------------------------
 //
 // A realistic settings panel: a sidebar of categories (composition of clickable
@@ -1777,7 +2174,7 @@ ElementPtr footer(App& app) {
 ElementPtr tab_bar(App& app) {
     const Palette& pal = app.host.palette();
     auto bar = segmented_control(pal,
-        {L"Form controls", L"Pickers", L"Patterns", L"Mini-apps"},
+        {L"Form controls", L"Pickers", L"Patterns", L"Overlays", L"Mini-apps"},
         app.gallery_tab.get(),
         [&app](int i) { app.gallery_tab.set(i); });
     // The segmented_control is intrinsic-width by default; without this,
@@ -1839,7 +2236,13 @@ ElementPtr build_body(App& app) {
             patterns_right_section(app),
         });
         break;
-    case 3:   // Mini-apps — Settings, Inbox, Media Player
+    case 3:   // Overlays — Toast / Modal / Tooltip / Badge (Phase E)
+        left_col = mk_col({
+            overlays_section(app),
+        });
+        right_col = mk_col({});
+        break;
+    case 4:   // Mini-apps — Settings, Inbox, Media Player
     default:
         left_col = mk_col({
             settings_section(app),
@@ -1925,6 +2328,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.inbox_selected     = app.host.make_state<int>(1);
     app.media_playing      = app.host.make_state<bool>(false);
     app.media_volume       = app.host.make_state<float>(60.0f);
+    app.toasts             = app.host.make_state<std::vector<ToastEntry>>({
+        {0, L"New message in your inbox.",    L"info"},
+        {1, L"Profile saved.",                 L"success"},
+        {2, L"Storage almost full.",           L"warning"},
+        {3, L"Failed to delete file.",         L"danger"},
+    });
+    app.next_toast_id      = 4;
+    app.modal_open         = app.host.make_state<bool>(false);
+    app.tooltip_visible    = app.host.make_state<bool>(false);
+    app.tooltip_hint       = app.host.make_state<std::wstring>(L"");
     app.gallery_tab        = app.host.make_state<int>(0);
     app.host.set_root_builder([&app] { return build(app); });
 
