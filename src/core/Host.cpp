@@ -62,6 +62,56 @@ ElementPtr progress(float value, Props p) {
     return make(L"progress", std::move(p));
 }
 
+ElementPtr text_input(std::wstring value, std::function<void(std::wstring)> on_change, Props p) {
+    // The text input owns its visual chrome. The change handler is stored in
+    // on_text_change; the host's wndproc dispatches WM_CHAR/VK_BACK to the
+    // element at focused_input_path_ by calling that handler with the new
+    // text. A click focuses the input — see handle_lbutton_down.
+    p.text = std::move(value);
+    p.focusable = true;
+    if (!p.height.has_value()) p.height = static_cast<float>(tokens::control_height_md);
+    if (p.padding.left == 0.0f) p.padding.left = static_cast<float>(tokens::spacing_md);
+    if (p.padding.right == 0.0f) p.padding.right = static_cast<float>(tokens::spacing_sm);
+    if (p.radius == 0.0f) p.radius = static_cast<float>(tokens::radius_control);
+    if (!p.background.has_value()) p.background = Color{};
+    if (!p.border_color.has_value()) p.border_color = Color{};
+    if (p.border_width == 0.0f) p.border_width = 1.0f;
+    if (!p.text_color.has_value()) p.text_color = Color{};
+    if (p.text_align == Align::center) p.text_align = Align::start;
+    p.on_text_change = std::move(on_change);
+    return make(L"text_input", std::move(p));
+}
+
+ElementPtr slider(float value, float vmin, float vmax,
+                  std::function<void(float)> on_change, Props p) {
+    p.slider_min = vmin;
+    p.slider_max = vmax;
+    if (vmax > vmin) {
+        p.slider_value = (std::clamp(value, vmin, vmax) - vmin) / (vmax - vmin);
+    } else {
+        p.slider_value = 0.0f;
+    }
+    p.focusable = true;
+    if (!p.height.has_value()) p.height = static_cast<float>(tokens::control_height_md);
+    if (p.radius == 0.0f) p.radius = static_cast<float>(tokens::radius_control);
+    // Click + drag both route through on_value_change: handle_lbutton_down
+    // and the mouse_move-while-pressed branch both compute the normalised x
+    // and invoke this handler with the domain value.
+    p.on_value_change = std::move(on_change);
+    return make(L"slider", std::move(p));
+}
+
+ElementPtr toggle_switch(bool on, std::function<void(bool)> on_change, Props p) {
+    p.checked = on;
+    p.focusable = true;
+    if (!p.height.has_value()) p.height = 24.0f;
+    if (!p.width.has_value()) p.width = 44.0f;
+    p.on_click = [handler = std::move(on_change), on] {
+        if (handler) handler(!on);
+    };
+    return make(L"toggle", std::move(p));
+}
+
 ElementPtr with_children(ElementPtr parent, std::initializer_list<ElementPtr> children) {
     if (parent != nullptr) {
         parent->children.reserve(parent->children.size() + children.size());
@@ -156,6 +206,9 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 return 0;
             case WM_KEYDOWN:
                 host->handle_key_down(wparam);
+                return 0;
+            case WM_CHAR:
+                host->handle_char(wparam);
                 return 0;
             case WM_TIMER:
                 if (wparam == Host::fade_timer_id_) host->handle_timer();
@@ -363,8 +416,24 @@ void Host::handle_mouse_move(int px, int py) noexcept {
         tme.hwndTrack = hwnd_;
         TrackMouseEvent(&tme);
     }
+    const float lx = to_logical_px(px);
+    const float ly = to_logical_px(py);
     Path path;
-    (void)hit_test(to_logical_px(px), to_logical_px(py), path);
+    (void)hit_test(lx, ly, path);
+
+    // Drag-while-pressed: if the user pressed a slider and is still holding
+    // the button, mouse_move translates the thumb. pressed_path_ resolves to
+    // the slider; we compute the new value and call on_value_change.
+    if (!pressed_path_.empty()) {
+        if (const Element* e = resolve(pressed_path_);
+            e != nullptr && e->type == L"slider" && e->w > 0.0f
+            && e->props.on_value_change) {
+            const float t = std::clamp((lx - e->x) / e->w, 0.0f, 1.0f);
+            const float v = e->props.slider_min + t * (e->props.slider_max - e->props.slider_min);
+            e->props.on_value_change(v);
+        }
+    }
+
     if (path != hover_path_) {
         hover_path_ = std::move(path);
         // Hover highlight is applied at render time from hover_path_ and is not
@@ -383,8 +452,10 @@ void Host::handle_mouse_leave() noexcept {
 }
 
 void Host::handle_lbutton_down(int px, int py) noexcept {
+    const float lx = to_logical_px(px);
+    const float ly = to_logical_px(py);
     Path path;
-    const Element* target = hit_test(to_logical_px(px), to_logical_px(py), path);
+    const Element* target = hit_test(lx, ly, path);
     Path new_focus;
     Path new_pressed;
     if (target != nullptr) {
@@ -397,6 +468,28 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
                 break;
             }
             walk.pop_back();
+        }
+        // Text inputs own their own edit-mode focus independent of the
+        // keyboard focus ring — WM_CHAR dispatches here, not to focus_path_.
+        if (target->type == L"text_input") {
+            focused_input_path_ = path;
+        } else if (!focused_input_path_.empty()) {
+            focused_input_path_.clear();
+        }
+    } else {
+        // Background click drops text-input focus.
+        if (!focused_input_path_.empty()) focused_input_path_.clear();
+    }
+    // Sliders fire their on_value_change on mouse_down so a single click
+    // jumps the thumb to that x without requiring drag. Slider drag is
+    // handled in handle_mouse_move (pressed_path_ anchors the target).
+    if (!new_pressed.empty()) {
+        if (const Element* e = resolve(new_pressed);
+            e != nullptr && e->type == L"slider" && e->w > 0.0f
+            && e->props.on_value_change) {
+            const float t = std::clamp((lx - e->x) / e->w, 0.0f, 1.0f);
+            const float v = e->props.slider_min + t * (e->props.slider_max - e->props.slider_min);
+            e->props.on_value_change(v);
         }
     }
     // Background click clears focus (target == nullptr OR no interactive
@@ -447,6 +540,19 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
 
 void Host::handle_key_down(WPARAM vk) noexcept {
     if (tree_ == nullptr) return;
+
+    // VK_BACK on a focused text_input deletes the trailing character. We do
+    // this in WM_KEYDOWN because VK_BACK does not generate a WM_CHAR message.
+    if (vk == VK_BACK && !focused_input_path_.empty()) {
+        if (const Element* e = resolve(focused_input_path_);
+            e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
+            std::wstring text = e->props.text;
+            if (!text.empty()) text.pop_back();
+            e->props.on_text_change(std::move(text));
+        }
+        return;
+    }
+
     std::vector<Path> order;
     collect_focusable(*tree_, Path{}, order);
     if (order.empty()) return;
@@ -474,6 +580,21 @@ void Host::handle_key_down(WPARAM vk) noexcept {
             e != nullptr && e->props.on_click && e->props.enabled) {
             e->props.on_click();   // handler-driven render; no force_full_dirty
         }
+    }
+}
+
+void Host::handle_char(WPARAM ch) noexcept {
+    // WM_CHAR delivers UTF-16 code units (wchar_t on Windows). VK_BACK has
+    // already been handled in WM_KEYDOWN, and we want printable characters
+    // only — reject control codes so a stray WM_CHAR from the keyboard
+    // autorepeat doesn't pollute the input.
+    if (ch < 0x20) return;
+    if (focused_input_path_.empty()) return;
+    if (const Element* e = resolve(focused_input_path_);
+        e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
+        std::wstring text = e->props.text;
+        text.push_back(static_cast<wchar_t>(ch));
+        e->props.on_text_change(std::move(text));
     }
 }
 
@@ -694,6 +815,69 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
             renderer_.fill_round_rect(Rect{e.x, e.y, fill_w, e.h}, p.radius, pal.accent);
             renderer_.pop_clip();
         }
+    } else if (e.type == L"text_input") {
+        const bool is_focused = path == focused_input_path_;
+        const Color bg = is_focused && p.enabled ? pal.surface
+                      : !p.enabled ? pal.surface_variant
+                      : (p.background.value_or(pal.surface));
+        const Color border_c = is_focused && p.enabled ? pal.accent
+                            : !p.enabled ? pal.divider
+                            : (p.border_color.value_or(pal.border));
+        renderer_.fill_round_rect(r, p.radius, bg);
+        renderer_.draw_round_rect(Rect{r.x + 0.5f, r.y + 0.5f, r.w - 1.0f, r.h - 1.0f},
+                                  p.radius, border_c, p.border_width);
+        const Color tc = p.enabled ? pal.text : pal.text_secondary;
+        const Rect text_r{r.x + p.padding.left, r.y,
+                          r.w - p.padding.left - p.padding.right, r.h};
+        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, false, Align::start);
+        // Caret: thin 1px accent line at the trailing edge of the text. No
+        // blink animation in this pass; a blink would need a timer + State<T>
+        // round-trip and the existing framework doesn't have a cheap hook
+        // for it. Caret visibility IS enough to communicate focus.
+        if (is_focused && p.enabled) {
+            const auto [tw, th] = renderer_.measure_text(p.text, p.font_size_pt, false);
+            const float caret_x = text_r.x + tw;
+            const float caret_h = th;
+            const float caret_y = r.y + (r.h - caret_h) * 0.5f;
+            renderer_.fill_round_rect(Rect{caret_x, caret_y, 1.5f, caret_h},
+                                      0.5f, pal.accent);
+        }
+    } else if (e.type == L"slider") {
+        const float track_h = 4.0f;
+        const float track_y = r.y + (r.h - track_h) * 0.5f;
+        const Color track_c = !p.enabled ? pal.divider
+                          : (path == pressed_path_) ? pal.surface_variant
+                          : pal.surface_variant;
+        renderer_.fill_round_rect(Rect{r.x, track_y, r.w, track_h},
+                                  track_h * 0.5f, track_c);
+        const float fill_w = std::clamp(r.w * std::clamp(p.slider_value, 0.0f, 1.0f),
+                                        0.0f, r.w);
+        if (fill_w > 0.5f) {
+            renderer_.fill_round_rect(Rect{r.x, track_y, fill_w, track_h},
+                                      track_h * 0.5f,
+                                      p.enabled ? pal.accent : pal.divider);
+        }
+        const float thumb_r = (r.h - track_h) * 0.5f + 2.0f;
+        const float thumb_x = r.x + fill_w;
+        const float thumb_y = r.y + r.h * 0.5f;
+        const Color thumb_c = !p.enabled ? pal.text_secondary : pal.accent;
+        renderer_.fill_round_rect(
+            Rect{thumb_x - thumb_r, thumb_y - thumb_r, thumb_r * 2.0f, thumb_r * 2.0f},
+            thumb_r, thumb_c);
+    } else if (e.type == L"toggle") {
+        const bool is_on = p.checked.value_or(false);
+        const Color track_c = !p.enabled ? pal.divider
+                          : is_on ? pal.accent
+                          : (path == pressed_path_) ? pal.surface_variant
+                          : pal.surface_variant;
+        renderer_.fill_round_rect(r, r.h * 0.5f, track_c);
+        const float knob_r = (r.h - 4.0f) * 0.5f;
+        const float knob_x = is_on ? (r.x + r.w - r.h * 0.5f)
+                                   : (r.x + r.h * 0.5f);
+        const float knob_y = r.y + r.h * 0.5f;
+        renderer_.fill_round_rect(
+            Rect{knob_x - knob_r, knob_y - knob_r, knob_r * 2.0f, knob_r * 2.0f},
+            knob_r, p.enabled ? pal.on_accent : pal.text_secondary);
     }
 
     // Focus ring — 2px accent, outside-in on the control bounds.

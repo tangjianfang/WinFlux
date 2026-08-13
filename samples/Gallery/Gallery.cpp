@@ -20,6 +20,11 @@ struct App {
     State<bool> enable_animations;
     State<bool> enable_sound;
     State<float> progress;
+    // Phase A form primitives
+    State<std::wstring> input_name;
+    State<std::wstring> input_email;
+    State<float> volume;
+    State<bool> dark_mode;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -300,6 +305,89 @@ ElementPtr progress_section(App& app) {
     }, static_cast<float>(tokens::spacing_sm));
 
     return section_card(L"Progress", std::move(body), pal);
+}
+
+// ---- Inputs (form primitives) ---------------------------------------------
+//
+// TextInput accepts text via WM_CHAR/VK_BACK dispatched to the element at
+// focused_input_path_; the host does the bookkeeping. Slider click + drag
+// update on_value_change with the domain-mapped value. ToggleSwitch is
+// on_click-driven like checkbox but paints as a track + thumb.
+
+ElementPtr inputs_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    auto name_field = text_input(app.input_name.get(),
+        [&app](std::wstring s) { app.input_name.set(std::move(s)); });
+
+    auto email_field = text_input(app.input_email.get(),
+        [&app](std::wstring s) { app.input_email.set(std::move(s)); });
+    {
+        Props p;
+        p.background = pal.surface_variant;
+        p.text_color = pal.text_secondary;
+        p.font_size_pt = tokens::font_caption;
+        p.text_align = Align::start;
+        // Placeholder text shown when the input is empty.
+        auto placeholder = label(L"you@example.com", std::move(p));
+        if (app.input_email.get().empty()) {
+            email_field->children.push_back(std::move(placeholder));
+        }
+    }
+
+    auto value_label = [&] {
+        Props p;
+        p.text_color = pal.text_secondary;
+        p.font_size_pt = tokens::font_caption;
+        p.text_align = Align::start;
+        auto lbl = label(L"Volume: " + std::to_wstring(static_cast<int>(app.volume.get())) + L"%", std::move(p));
+        return lbl;
+    }();
+
+    auto volume_slider = slider(app.volume.get(), 0.0f, 100.0f,
+        [&app](float v) { app.volume.set(v); });
+    {
+        Props p;
+        p.width = 100.0f;
+        volume_slider->props.width = p.width;
+    }
+
+    auto dark_toggle = toggle_switch(app.dark_mode.get(),
+        [&app](bool v) { app.dark_mode.set(v); });
+    dark_toggle->props.flex_grow = 0.0f;
+
+    Props field_label_p;
+    field_label_p.text_color = pal.text_secondary;
+    field_label_p.font_size_pt = tokens::font_caption;
+    field_label_p.text_align = Align::start;
+
+    auto fields = col_view({
+        label(L"Name", field_label_p),
+        name_field,
+        label(L"Email", field_label_p),
+        email_field,
+    }, static_cast<float>(tokens::spacing_xs));
+
+    auto sliders = col_view({
+        value_label,
+        volume_slider,
+    }, static_cast<float>(tokens::spacing_xs));
+
+    auto toggle_row = row_view({
+        [&] {
+            Props p = field_label_p;
+            return label(L"Dark theme", std::move(p));
+        }(),
+        dark_toggle,
+    }, static_cast<float>(tokens::spacing_md), Align::center);
+
+    auto body = col_view({
+        std::move(fields),
+        std::move(sliders),
+        std::move(toggle_row),
+    }, static_cast<float>(tokens::spacing_md));
+
+    return section_card(L"Inputs", std::move(body), pal);
 }
 
 // ---- Typography ------------------------------------------------------------
@@ -605,6 +693,7 @@ ElementPtr build(App& app) {
         buttons_section(app),
         checkboxes_section(app),
         progress_section(app),
+        inputs_section(app),
     }, static_cast<float>(tokens::spacing_lg), Align::start);
 
     auto right_col = col_view({
@@ -634,6 +723,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.enable_animations = app.host.make_state<bool>(true);
     app.enable_sound = app.host.make_state<bool>(false);
     app.progress = app.host.make_state<float>(0.35f);
+    app.input_name = app.host.make_state<std::wstring>(L"");
+    app.input_email = app.host.make_state<std::wstring>(L"");
+    app.volume = app.host.make_state<float>(40.0f);
+    app.dark_mode = app.host.make_state<bool>(false);
     app.host.set_root_builder([&app] { return build(app); });
 
     Host::Config cfg;

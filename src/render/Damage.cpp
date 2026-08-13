@@ -112,6 +112,9 @@ bool DamageTracker::paint_props_equal(const Props& a, const Props& b) noexcept {
     if (a.text_align != b.text_align) return false;
     if (a.checked != b.checked) return false;
     if (a.progress_value != b.progress_value) return false;
+    if (a.slider_value != b.slider_value) return false;
+    if (a.slider_min != b.slider_min) return false;
+    if (a.slider_max != b.slider_max) return false;
     if (a.enabled != b.enabled) return false;
     if (a.focusable != b.focusable) return false;
     return true;

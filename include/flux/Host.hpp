@@ -91,6 +91,7 @@ private:
     void handle_lbutton_down(int px, int py) noexcept;
     void handle_lbutton_up(int px, int py) noexcept;
     void handle_key_down(WPARAM vk) noexcept;
+    void handle_char(WPARAM ch) noexcept;
     void handle_size(unsigned width_px, unsigned height_px) noexcept;
     void handle_dpi_changed(unsigned dpi, const RECT& suggested) noexcept;
     void handle_timer() noexcept;
@@ -144,6 +145,11 @@ private:
     Path hover_path_;
     Path pressed_path_;
     Path focus_path_;
+    // The text input currently receiving WM_CHAR. A click on a text_input
+    // updates this path; WM_CHAR appends (and VK_BACK deletes) one char and
+    // invokes the input's on_click handler with the new text. Empty path
+    // means no input is in edit mode.
+    Path focused_input_path_;
     // Snapshots of the above from the previous paint_frame, used to feed the
     // damage diff so hover/press/focus changes produce partial repaints
     // instead of being forced into a fullscreen update.

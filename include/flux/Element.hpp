@@ -29,6 +29,8 @@ struct EdgeInsets {
 };
 
 using ClickHandler = std::function<void()>;
+using TextChangeHandler = std::function<void(std::wstring)>;
+using ValueChangeHandler = std::function<void(float)>;
 
 struct Props {
     // Layout
@@ -60,16 +62,21 @@ struct Props {
 
     // Interaction
     ClickHandler on_click;
+    TextChangeHandler on_text_change;
+    ValueChangeHandler on_value_change;
     bool focusable = false;
     bool enabled = true;
 
     // Typed-element payloads
     std::optional<bool> checked;   // present => checkbox glyph rendering
     float progress_value = 0.0f;   // 0..1, used by progress()
+    float slider_value = 0.0f;     // 0..1 normalised, used by slider()
+    float slider_min = 0.0f;       // domain minimum, used by slider()
+    float slider_max = 1.0f;       // domain maximum, used by slider()
 };
 
 struct Element {
-    std::wstring type;   // "view" | "label" | "button" | "checkbox" | "progress"
+    std::wstring type;   // "view" | "label" | "button" | "checkbox" | "progress" | "text_input" | "slider" | "toggle"
     Props props;
     std::vector<std::shared_ptr<Element>> children;
 
@@ -90,6 +97,16 @@ using ElementPtr = std::shared_ptr<Element>;
 [[nodiscard]] ElementPtr checkbox(std::wstring text, bool checked,
                                   std::function<void(bool)> on_change, Props p = {});
 [[nodiscard]] ElementPtr progress(float value, Props p = {});
+
+// Interactive primitives beyond button/checkbox. Each owns its own element
+// type so the paint branch can pick the right glyph; builders take the
+// current value plus a callback so the host-side State<T> stays the source
+// of truth (props.* are per-frame snapshots).
+[[nodiscard]] ElementPtr text_input(std::wstring value, std::function<void(std::wstring)> on_change,
+                                    Props p = {});
+[[nodiscard]] ElementPtr slider(float value, float vmin, float vmax,
+                                std::function<void(float)> on_change, Props p = {});
+[[nodiscard]] ElementPtr toggle_switch(bool on, std::function<void(bool)> on_change, Props p = {});
 
 [[nodiscard]] ElementPtr with_children(ElementPtr parent,
                                        std::initializer_list<ElementPtr> children);
