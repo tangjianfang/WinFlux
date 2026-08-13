@@ -47,6 +47,12 @@ struct App {
     State<int> inbox_selected;        // selected message id, -1 = none
     State<bool> media_playing;
     State<float> media_volume;        // 0..100
+    // Top-level gallery navigation. The window can't fit every section
+    // (twelve cards at full padding overflow the work area on most
+    // monitors), so the body switches between four category tabs. Each
+    // tab holds a small enough set to fit a 1000-px-tall window.
+    //   0 = Form controls, 1 = Pickers, 2 = Patterns, 3 = Mini-apps
+    State<int> gallery_tab;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -540,7 +546,9 @@ ElementPtr date_picker(const Palette& pal, int year, int month, int day,
             } else {
                 cell_p.text = std::to_wstring(cell_day);
                 cell_p.text_color = cell_day == day ? pal.on_accent : pal.text;
-                cell_p.background = cell_day == day ? pal.accent : Color{};
+                cell_p.background = cell_day == day
+                                       ? std::optional<Color>{pal.accent}
+                                       : std::nullopt;
                 cell_p.enabled = true;
                 const int captured_day = cell_day;
                 cell_p.on_click = [year, month, captured_day, on_change] {
@@ -623,6 +631,11 @@ ElementPtr inputs_section(App& app) {
     auto toggle_row = row_view({
         [&] {
             Props p = field_label_p;
+            // Push the toggle to the right edge of the row by absorbing
+            // the free space; without flex_grow, the label's intrinsic
+            // width sits next to the toggle and the gap between them is
+            // tiny — and on wider columns the row's text gets clipped.
+            p.flex_grow = 1.0f;
             return label(L"Dark theme", std::move(p));
         }(),
         dark_toggle,
@@ -638,8 +651,13 @@ ElementPtr inputs_section(App& app) {
 }
 
 // ---- Pickers (RadioGroup, ColorPicker, DatePicker) -------------------------
+//
+// Split into two cards so the Pickers tab can render them in a 2-column grid.
+// The calendar wants the full row width (it has 6 columns of 7 cells) so it
+// lives on the right; the radio group and swatch grid are narrower and stack
+// on the left.
 
-ElementPtr pickers_section(App& app) {
+ElementPtr pickers_left_section(App& app) {
     const Palette& pal = app.host.palette();
 
     std::vector<std::wstring> theme_options = {L"Light", L"Dark", L"High contrast"};
@@ -663,6 +681,24 @@ ElementPtr pickers_section(App& app) {
     auto swatch_picker = color_picker(pal, swatches, app.accent_pick.get(),
         [&app](int i) { app.accent_pick.set(i); });
 
+    Props caption_p;
+    caption_p.text_color = pal.text_secondary;
+    caption_p.font_size_pt = tokens::font_caption;
+    caption_p.text_align = Align::start;
+
+    auto body = col_view({
+        label(L"Theme (radio)", caption_p),
+        theme_radio,
+        label(L"Accent (swatches)", caption_p),
+        swatch_picker,
+    }, static_cast<float>(tokens::spacing_md));
+
+    return section_card(L"Selection", std::move(body), pal);
+}
+
+ElementPtr pickers_right_section(App& app) {
+    const Palette& pal = app.host.palette();
+
     auto cal = date_picker(pal,
         app.birthday_year.get(),
         app.birthday_month.get(),
@@ -679,15 +715,11 @@ ElementPtr pickers_section(App& app) {
     caption_p.text_align = Align::start;
 
     auto body = col_view({
-        label(L"Theme (radio)", caption_p),
-        theme_radio,
-        label(L"Accent (swatches)", caption_p),
-        swatch_picker,
         label(L"Birthday (calendar)", caption_p),
         cal,
     }, static_cast<float>(tokens::spacing_md));
 
-    return section_card(L"Pickers", std::move(body), pal);
+    return section_card(L"Calendar", std::move(body), pal);
 }
 
 struct TabSpec { std::wstring label; std::wstring body; };
@@ -830,7 +862,9 @@ ElementPtr segmented_control(const Palette& pal, std::vector<std::wstring> optio
         seg_p.height = static_cast<float>(tokens::control_height_sm);
         seg_p.text = options[i];
         seg_p.text_color = is_sel ? pal.on_accent : pal.text;
-        seg_p.background = is_sel ? pal.accent : Color{};
+        seg_p.background = is_sel
+                                ? std::optional<Color>{pal.accent}
+                                : std::nullopt;
         seg_p.font_size_pt = tokens::font_caption;
         seg_p.text_align = Align::center;
         seg_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
@@ -870,7 +904,9 @@ ElementPtr pagination(const Palette& pal, int current, int total,
         pg_p.radius = static_cast<float>(tokens::radius_sm);
         pg_p.text = std::to_wstring(p + 1);
         pg_p.text_color = is_cur ? pal.on_accent : pal.text;
-        pg_p.background = is_cur ? pal.accent : Color{};
+        pg_p.background = is_cur
+                                ? std::optional<Color>{pal.accent}
+                                : std::nullopt;
         pg_p.font_size_pt = tokens::font_caption;
         pg_p.text_align = Align::center;
         pg_p.on_click = [on_change, p] { if (on_change) on_change(p); };
@@ -943,7 +979,9 @@ ElementPtr settings_section(App& app) {
         p.height = static_cast<float>(tokens::control_height_sm);
         p.text = text;
         p.text_color = is_on ? pal.on_accent : pal.text;
-        p.background = is_on ? pal.accent : Color{};
+        p.background = is_on
+                            ? std::optional<Color>{pal.accent}
+                            : std::nullopt;
         p.font_size_pt = tokens::font_caption;
         p.text_align = Align::center;
         p.on_click = [&app, idx] { app.settings_timezone.set(idx); };
@@ -1376,8 +1414,12 @@ ElementPtr media_player_section(App& app) {
 }
 
 // ---- Patterns (Tabs, Accordion, SegmentedControl, Pagination, Alert) -----
+//
+// Split into two cards so the Patterns tab can render them in a 2-column
+// grid. Left card holds the navigators (tabs, accordion, segmented); right
+// card holds the data-flavoured patterns (pagination, alert).
 
-ElementPtr patterns_section(App& app) {
+ElementPtr patterns_left_section(App& app) {
     const Palette& pal = app.host.palette();
 
     std::vector<TabSpec> tab_specs = {
@@ -1401,6 +1443,26 @@ ElementPtr patterns_section(App& app) {
         app.view_mode.get(),
         [&app](int i) { app.view_mode.set(i); });
 
+    Props caption_p;
+    caption_p.text_color = pal.text_secondary;
+    caption_p.font_size_pt = tokens::font_caption;
+    caption_p.text_align = Align::start;
+
+    auto body = col_view({
+        label(L"Tabs", caption_p),
+        tab_block,
+        label(L"Accordion", caption_p),
+        acc_block,
+        label(L"Segmented control", caption_p),
+        seg,
+    }, static_cast<float>(tokens::spacing_md));
+
+    return section_card(L"Navigation", std::move(body), pal);
+}
+
+ElementPtr patterns_right_section(App& app) {
+    const Palette& pal = app.host.palette();
+
     auto pag = pagination(pal, app.inbox_page.get(), 6,
         [&app](int i) { app.inbox_page.set(i); });
 
@@ -1420,19 +1482,13 @@ ElementPtr patterns_section(App& app) {
     caption_p.text_align = Align::start;
 
     auto body = col_view({
-        label(L"Tabs", caption_p),
-        tab_block,
-        label(L"Accordion", caption_p),
-        acc_block,
-        label(L"Segmented control", caption_p),
-        seg,
         label(L"Pagination", caption_p),
         pag,
         label(L"Alert (dismissible)", caption_p),
         al,
     }, static_cast<float>(tokens::spacing_md));
 
-    return section_card(L"Patterns", std::move(body), pal);
+    return section_card(L"Status", std::move(body), pal);
 }
 
 // ---- Typography ------------------------------------------------------------
@@ -1716,6 +1772,89 @@ ElementPtr footer(App& app) {
 
 // ---- Root ------------------------------------------------------------------
 
+// Top-level category tab bar. A thin wrapper over segmented_control so the
+// four tab labels read as the "section navigation" for the body below.
+ElementPtr tab_bar(App& app) {
+    const Palette& pal = app.host.palette();
+    auto bar = segmented_control(pal,
+        {L"Form controls", L"Pickers", L"Patterns", L"Mini-apps"},
+        app.gallery_tab.get(),
+        [&app](int i) { app.gallery_tab.set(i); });
+    // The segmented_control is intrinsic-width by default; without this,
+    // the four segments sit squished in the upper-left of the root column
+    // instead of spanning the full window width.
+    bar->props.flex_grow = 1.0f;
+    return bar;
+}
+
+// Build the body for the currently-active gallery tab. Each tab is its own
+// 2-column grid; the section set was chosen so every card fits inside a
+// 1000-px window without scrolling.
+ElementPtr build_body(App& app) {
+    Props body_p;
+    body_p.direction = Direction::row;
+    body_p.align = Align::start;
+    body_p.gap = static_cast<float>(tokens::spacing_lg);
+    auto body = view(std::move(body_p));
+    // Without flex_grow, flex_layout would size the body to the sum of its
+    // two columns' intrinsic widths — which leaves a wide empty band on the
+    // right once the window is wider than the content. Stretch the body
+    // across the root, then split it 50/50 between the two columns below.
+    body->props.flex_grow = 1.0f;
+
+    auto mk_col = [&](std::vector<ElementPtr> children) {
+        auto c = col_view(std::move(children),
+                          static_cast<float>(tokens::spacing_lg), Align::stretch);
+        c->props.flex_grow = 1.0f;
+        return c;
+    };
+
+    ElementPtr left_col;
+    ElementPtr right_col;
+    switch (app.gallery_tab.get()) {
+    case 0:   // Form controls — primitive element types
+        left_col = mk_col({
+            buttons_section(app),
+            checkboxes_section(app),
+            progress_section(app),
+        });
+        right_col = mk_col({
+            inputs_section(app),
+            containers_section(app),
+        });
+        break;
+    case 1:   // Pickers — composite controls (radio / colour / date)
+        left_col = mk_col({
+            pickers_left_section(app),
+        });
+        right_col = mk_col({
+            pickers_right_section(app),
+        });
+        break;
+    case 2:   // Patterns — navigation + interaction patterns
+        left_col = mk_col({
+            patterns_left_section(app),
+        });
+        right_col = mk_col({
+            patterns_right_section(app),
+        });
+        break;
+    case 3:   // Mini-apps — Settings, Inbox, Media Player
+    default:
+        left_col = mk_col({
+            settings_section(app),
+            inbox_section(app),
+        });
+        right_col = mk_col({
+            media_player_section(app),
+        });
+        break;
+    }
+    body->children.push_back(std::move(left_col));
+    body->children.push_back(std::move(right_col));
+    return body;
+}
+
 ElementPtr build(App& app) {
     const Palette& pal = app.host.palette();
 
@@ -1724,41 +1863,16 @@ ElementPtr build(App& app) {
     root_p.padding = pad_all(static_cast<float>(tokens::spacing_lg));
     root_p.gap = static_cast<float>(tokens::spacing_lg);
     root_p.background = pal.background;
-
-    // Two-column body. Without flex-wrap the only way to get a multi-column
-    // page is an explicit row of two columns; each column then stacks its
-    // own sections vertically. Header + footer span full width above and
-    // below.
-    Props body_p;
-    body_p.direction = Direction::row;
-    body_p.align = Align::start;
-    body_p.gap = static_cast<float>(tokens::spacing_lg);
-
-    auto left_col = col_view({
-        buttons_section(app),
-        checkboxes_section(app),
-        progress_section(app),
-        inputs_section(app),
-        settings_section(app),
-    }, static_cast<float>(tokens::spacing_lg), Align::start);
-
-    auto right_col = col_view({
-        typography_section(app),
-        containers_section(app),
-        layout_section(app),
-        pickers_section(app),
-        patterns_section(app),
-        inbox_section(app),
-        media_player_section(app),
-    }, static_cast<float>(tokens::spacing_lg), Align::start);
-
-    auto body = view(std::move(body_p));
-    body->children.push_back(std::move(left_col));
-    body->children.push_back(std::move(right_col));
+    // Cross-axis stretch so the tab bar and the 2-column body both span
+    // the full window width. Without this each child sizes to its own
+    // intrinsic width and the tab segments end up squished in the
+    // upper-left of the page.
+    root_p.align = Align::stretch;
 
     auto parent = view(std::move(root_p));
     parent->children.push_back(header(app));
-    parent->children.push_back(std::move(body));
+    parent->children.push_back(tab_bar(app));
+    parent->children.push_back(build_body(app));
     parent->children.push_back(footer(app));
     return parent;
 }
@@ -1768,11 +1882,28 @@ ElementPtr build(App& app) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     enable_per_monitor_dpi_v2();
 
+    // Query the work area (excludes the taskbar + docked app bars). The
+    // Gallery originally hard-coded 1200x1100, which overflowed the screen
+    // on smaller monitors and covered the taskbar. We shrink that to
+    // work-area minus a 24-px margin on every side, with a 1000-px height
+    // cap so a single 1080p-tall monitor still leaves headroom. The cap
+    // matters: a 4K display has a work area taller than the content needs,
+    // and an oversized window just means the cards float in the middle of
+    // a sea of background.
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int phys_w = work.right - work.left;
+    const int phys_h = work.bottom - work.top;
+    constexpr int kMargin = 24;
+    constexpr int kMaxHeight = 1000;
+    constexpr int kMinWidth  = 900;
+    constexpr int kMinHeight = 600;
+
     App app;
-    app.count = app.host.make_state<int>(0);
+    app.count             = app.host.make_state<int>(0);
     app.enable_animations = app.host.make_state<bool>(true);
-    app.enable_sound = app.host.make_state<bool>(false);
-    app.progress = app.host.make_state<float>(0.35f);
+    app.enable_sound      = app.host.make_state<bool>(false);
+    app.progress          = app.host.make_state<float>(0.35f);
     app.input_name = app.host.make_state<std::wstring>(L"");
     app.input_email = app.host.make_state<std::wstring>(L"");
     app.volume = app.host.make_state<float>(40.0f);
@@ -1794,12 +1925,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.inbox_selected     = app.host.make_state<int>(1);
     app.media_playing      = app.host.make_state<bool>(false);
     app.media_volume       = app.host.make_state<float>(60.0f);
+    app.gallery_tab        = app.host.make_state<int>(0);
     app.host.set_root_builder([&app] { return build(app); });
 
     Host::Config cfg;
     cfg.title = L"WinFlux Gallery";
-    cfg.width = 1200;
-    cfg.height = 1100;
+    cfg.width  = std::clamp(phys_w - 2 * kMargin, kMinWidth,  4096);
+    cfg.height = std::clamp(std::min(phys_h - 2 * kMargin, kMaxHeight),
+                            kMinHeight, 4096);
     if (!app.host.create(cfg, instance)) {
         MessageBoxW(nullptr, L"WinFlux host creation failed (Direct2D unavailable?).",
                     L"WinFlux", MB_ICONERROR);

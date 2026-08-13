@@ -73,10 +73,10 @@ ElementPtr text_input(std::wstring value, std::function<void(std::wstring)> on_c
     if (p.padding.left == 0.0f) p.padding.left = static_cast<float>(tokens::spacing_md);
     if (p.padding.right == 0.0f) p.padding.right = static_cast<float>(tokens::spacing_sm);
     if (p.radius == 0.0f) p.radius = static_cast<float>(tokens::radius_control);
-    if (!p.background.has_value()) p.background = Color{};
-    if (!p.border_color.has_value()) p.border_color = Color{};
+    if (!p.background.has_value()) p.background = std::optional<Color>{};
+    if (!p.border_color.has_value()) p.border_color = std::optional<Color>{};
     if (p.border_width == 0.0f) p.border_width = 1.0f;
-    if (!p.text_color.has_value()) p.text_color = Color{};
+    if (!p.text_color.has_value()) p.text_color = std::optional<Color>{};
     if (p.text_align == Align::center) p.text_align = Align::start;
     p.on_text_change = std::move(on_change);
     return make(L"text_input", std::move(p));
