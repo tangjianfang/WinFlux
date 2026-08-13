@@ -642,7 +642,15 @@ void Host::paint_frame() noexcept {
             if (e.type == L"checkbox") {
                 return {box + tokens::spacing_sm + tw, std::max(box, th)};
             }
-            return {tw, th};
+            // Leaf views with no text (bars, spacers, avatars, decorative
+            // rectangles) still have an intrinsic size when width/height is
+            // explicit — without falling back to those, parents walking the
+            // tree during measure_impl see a 0×0 leaf and collapse the
+            // subtree to intrinsic 0. The bar chart's bars and spacers and
+            // the avatar group's 32-px circles all rely on this.
+            const float w = e.props.width.value_or(tw);
+            const float h = e.props.height.value_or(th);
+            return {w, h};
         };
         flex_layout(*tree_, logical_w, logical_h, ctx);
     }

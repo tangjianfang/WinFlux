@@ -45,6 +45,13 @@ std::pair<float, float> measure_impl(const Element& e, const LayoutContext& ctx,
         }
         result = row ? std::pair{main + pad.left + pad.right, cross + pad.top + pad.bottom}
                      : std::pair{cross + pad.left + pad.right, main + pad.top + pad.bottom};
+        // Non-leaf containers with explicit width / height (e.g. the
+        // 32x32 avatar circles) still measure from their children if we
+        // don't override here — the children's intrinsic sizes then leak
+        // up and collapse the parent. Prefer the explicit dimension when
+        // set; keep the other axis from the children.
+        if (e.props.width.has_value())  result.first  = *e.props.width  + pad.left + pad.right;
+        if (e.props.height.has_value()) result.second = *e.props.height + pad.top  + pad.bottom;
     }
     cache.emplace(&e, MeasureValue{result.first, result.second});
     return result;
