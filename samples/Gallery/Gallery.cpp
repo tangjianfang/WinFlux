@@ -39,6 +39,14 @@ struct App {
     State<int> view_mode;
     State<int> inbox_page;
     State<bool> show_alert;
+    // Phase D apps
+    State<bool> settings_email_digest;
+    State<bool> settings_auto_update;
+    State<int> settings_timezone;     // 0=local, 1=UTC
+    State<int> settings_language;     // 0=English, 1=中文, 2=日本語
+    State<int> inbox_selected;        // selected message id, -1 = none
+    State<bool> media_playing;
+    State<float> media_volume;        // 0..100
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -141,6 +149,36 @@ ElementPtr col_view(std::vector<ElementPtr> children,
     for (auto& c : children) parent->children.push_back(std::move(c));
     return parent;
 }
+
+// A tall thin spacer view — used to push the next control down without
+// coupling it to the parent's flex math. Height is in logical px.
+ElementPtr spacer_h(float height) {
+    Props p;
+    p.height = height;
+    p.direction = Direction::column;
+    return view(std::move(p));
+}
+
+// A labelled text-input row: caption above, input below. The label-input
+// pairing is the most common pattern in the Settings mini-app, so it
+// gets its own helper instead of being open-coded in every call site.
+ElementPtr label_input_row(const Palette& pal, const wchar_t* caption,
+                           std::wstring value,
+                           std::function<void(std::wstring)> on_change) {
+    Props col_p;
+    col_p.gap = static_cast<float>(tokens::spacing_xs);
+    col_p.direction = Direction::column;
+    auto col = view(std::move(col_p));
+    Props cap;
+    cap.text = caption;
+    cap.text_color = pal.text_secondary;
+    cap.font_size_pt = tokens::font_caption;
+    cap.text_align = Align::start;
+    col->children.push_back(label(caption, std::move(cap)));
+    col->children.push_back(text_input(std::move(value), std::move(on_change)));
+    return col;
+}
+
 
 // ---- Header ----------------------------------------------------------------
 
@@ -878,6 +916,465 @@ ElementPtr alert(const Palette& pal, const wchar_t* kind, const wchar_t* text,
     return row;
 }
 
+
+// ---- Mini-app: Settings -----------------------------------------------------
+//
+// A realistic settings panel: a sidebar of categories (composition of clickable
+// rows), content area with toggle switches, segmented controls, and a primary
+// action button. Demonstrates that the framework primitives compose into a
+// feature-complete screen without any new element types.
+
+ElementPtr settings_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    // ---- Sidebar row: two segmented-style category buttons ----
+    const int tab = app.settings_timezone.get();   // reuse state to track "Preferences/Account" tab
+    Props tabs_p;
+    tabs_p.gap = 0.0f;
+    tabs_p.direction = Direction::row;
+    tabs_p.radius = static_cast<float>(tokens::radius_control);
+    tabs_p.border_color = pal.border;
+    tabs_p.border_width = 1.0f;
+    auto tab_row = view(std::move(tabs_p));
+    auto mk_tab = [&](const wchar_t* text, int idx) {
+        const bool is_on = idx == tab;
+        Props p;
+        p.flex_grow = 1.0f;
+        p.height = static_cast<float>(tokens::control_height_sm);
+        p.text = text;
+        p.text_color = is_on ? pal.on_accent : pal.text;
+        p.background = is_on ? pal.accent : Color{};
+        p.font_size_pt = tokens::font_caption;
+        p.text_align = Align::center;
+        p.on_click = [&app, idx] { app.settings_timezone.set(idx); };
+        return label(text, std::move(p));
+    };
+    tab_row->children.push_back(mk_tab(L"Preferences", 0));
+    tab_row->children.push_back(mk_tab(L"Account",     1));
+
+    // ---- Preferences panel (tab == 0) ----
+    auto pref_panel = [&]() {
+        Props panel_p;
+        panel_p.gap = static_cast<float>(tokens::spacing_md);
+        panel_p.direction = Direction::column;
+        auto panel = view(std::move(panel_p));
+
+        // Email digest toggle row.
+        Props r1_p;
+        r1_p.gap = static_cast<float>(tokens::spacing_md);
+        r1_p.direction = Direction::row;
+        r1_p.align = Align::center;
+        r1_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_sm), 0.0f,
+                                   static_cast<float>(tokens::spacing_sm), 0.0f};
+        auto r1 = view(std::move(r1_p));
+        Props r1t;
+        r1t.text = L"Email digest";
+        r1t.text_color = pal.text;
+        r1t.font_size_pt = tokens::font_body;
+        r1t.text_align = Align::start;
+        r1t.flex_grow = 1.0f;
+        r1->children.push_back(label(L"Email digest", std::move(r1t)));
+        r1->children.push_back(toggle_switch(app.settings_email_digest.get(),
+            [&app](bool v) { app.settings_email_digest.set(v); }));
+        panel->children.push_back(std::move(r1));
+
+        // Auto-update toggle row.
+        Props r2_p;
+        r2_p.gap = static_cast<float>(tokens::spacing_md);
+        r2_p.direction = Direction::row;
+        r2_p.align = Align::center;
+        r2_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_sm), 0.0f,
+                                   static_cast<float>(tokens::spacing_sm), 0.0f};
+        auto r2 = view(std::move(r2_p));
+        Props r2t;
+        r2t.text = L"Auto-update";
+        r2t.text_color = pal.text;
+        r2t.font_size_pt = tokens::font_body;
+        r2t.text_align = Align::start;
+        r2t.flex_grow = 1.0f;
+        r2->children.push_back(label(L"Auto-update", std::move(r2t)));
+        r2->children.push_back(toggle_switch(app.settings_auto_update.get(),
+            [&app](bool v) { app.settings_auto_update.set(v); }));
+        panel->children.push_back(std::move(r2));
+
+        // Language label + segmented control.
+        Props lang_lbl;
+        lang_lbl.text = L"Language";
+        lang_lbl.text_color = pal.text_secondary;
+        lang_lbl.font_size_pt = tokens::font_caption;
+        lang_lbl.text_align = Align::start;
+        panel->children.push_back(label(L"Language", std::move(lang_lbl)));
+        panel->children.push_back(segmented_control(pal,
+            {L"English", L"中文", L"日本語"},
+            app.settings_language.get(),
+            [&app](int v) { app.settings_language.set(v); }));
+
+        panel->children.push_back(spacer_h(8.0f));
+
+        // Save button.
+        Props save_p = button_primary(pal);
+        save_p.text = L"Save changes";
+        save_p.height = static_cast<float>(tokens::control_height_md);
+        save_p.on_click = [] { /* persist */ };
+        panel->children.push_back(button(L"Save changes", nullptr, std::move(save_p)));
+        return panel;
+    };
+
+    // ---- Account panel (tab == 1) ----
+    auto account_panel = [&]() {
+        Props panel_p;
+        panel_p.gap = static_cast<float>(tokens::spacing_md);
+        panel_p.direction = Direction::column;
+        auto panel = view(std::move(panel_p));
+
+        // Display name input.
+        panel->children.push_back(label_input_row(pal, L"Display name",
+            app.input_name.get(),
+            [&app](std::wstring v) { app.input_name.set(std::move(v)); }));
+
+        // Email input.
+        panel->children.push_back(label_input_row(pal, L"Email",
+            app.input_email.get(),
+            [&app](std::wstring v) { app.input_email.set(std::move(v)); }));
+
+        panel->children.push_back(spacer_h(8.0f));
+
+        Props signout_p;
+        signout_p.background = pal.surface;
+        signout_p.hover_background = pal.surface_hover;
+        signout_p.pressed_background = pal.surface_variant;
+        signout_p.border_color = pal.danger;
+        signout_p.border_width = 1.0f;
+        signout_p.text_color = pal.danger;
+        signout_p.height = static_cast<float>(tokens::control_height_md);
+        signout_p.text = L"Sign out";
+        signout_p.radius = static_cast<float>(tokens::radius_control);
+        signout_p.on_click = [] { /* sign out */ };
+        panel->children.push_back(button(L"Sign out", nullptr, std::move(signout_p)));
+        return panel;
+    };
+
+    Props body_p;
+    body_p.gap = static_cast<float>(tokens::spacing_md);
+    body_p.direction = Direction::column;
+    auto body = view(std::move(body_p));
+    body->children.push_back(std::move(tab_row));
+    body->children.push_back(tab == 0 ? pref_panel() : account_panel());
+
+    return section_card(L"Settings", std::move(body), pal);
+}
+
+// ---- Mini-app: Inbox --------------------------------------------------------
+//
+// A list+messages layout composed of clickable rows + pagination. The list
+// rows toggle a "selected" state via State<int> (message id). Pagination
+// controls the page index; the selected message renders a preview pane.
+
+namespace {
+struct InboxMessage {
+    int id;
+    std::wstring from;
+    std::wstring subject;
+    std::wstring preview;
+    std::wstring time;
+};
+
+const std::vector<InboxMessage>& inbox_messages() {
+    static const std::vector<InboxMessage> kMessages = {
+        {1, L"Ada Lovelace",     L"Notes on the Analytical Engine",
+            L"I have been re-reading your work on the difference engine and wanted to share some thoughts on loops…",
+            L"9:42 AM"},
+        {2, L"Grace Hopper",     L"Compiler follow-up",
+            L"The FLOW-MATIC draft is in good shape. One question about the macro expansion pass…",
+            L"Yesterday"},
+        {3, L"Alan Turing",      L"Halting problem redux",
+            L"If you have a moment, I would like to revisit the proof from our last conversation. I think the diagonal can be sharpened…",
+            L"Mon"},
+        {4, L"Edsger Dijkstra",  L"On goto considered harmful",
+            L"I have attached a draft for your review. The key argument is that the unconstrained jump obscures the program's invariants…",
+            L"Sun"},
+        {5, L"Margaret Hamilton",L"Apollo guidance updates",
+            L"The priority displays look great. A couple of edge cases in the ring buffer I would like to walk through…",
+            L"Aug 10"},
+        {6, L"Donald Knuth",     L"Volume 4B notes",
+            L"I made progress on the combinatorial algorithms chapter. The dancing links section needs another pass…",
+            L"Aug 9"},
+        {7, L"Linus Torvalds",   L"Re: kernel scheduler",
+            L"Your CFS patch looks reasonable. I have one concern about the wakeup latency in the idle path…",
+            L"Aug 8"},
+        {8, L"Barbara Liskov",   L"Substitutability examples",
+            L"I put together a small set of LSP violations worth discussing in the next reading group…",
+            L"Aug 7"},
+    };
+    return kMessages;
+}
+} // namespace
+
+ElementPtr inbox_section(App& app) {
+    const Palette& pal = app.host.palette();
+    const auto& all = inbox_messages();
+    constexpr int kPerPage = 4;
+    const int total_pages = (static_cast<int>(all.size()) + kPerPage - 1) / kPerPage;
+    const int page = std::clamp(app.inbox_page.get(), 0, total_pages - 1);
+    const int start = page * kPerPage;
+    const int end = std::min(start + kPerPage, static_cast<int>(all.size()));
+
+    // ---- List column ----
+    Props list_p;
+    list_p.gap = static_cast<float>(tokens::spacing_xs);
+    list_p.direction = Direction::column;
+    auto list = view(std::move(list_p));
+    for (int i = start; i < end; ++i) {
+        const auto& m = all[i];
+        const bool is_sel = app.inbox_selected.get() == m.id;
+        Props row_p;
+        row_p.gap = static_cast<float>(tokens::spacing_xs);
+        row_p.direction = Direction::column;
+        row_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_sm),
+                                   static_cast<float>(tokens::spacing_md),
+                                   static_cast<float>(tokens::spacing_sm),
+                                   static_cast<float>(tokens::spacing_md)};
+        row_p.radius = static_cast<float>(tokens::radius_md);
+        row_p.background = is_sel ? pal.surface_variant : pal.surface;
+        row_p.border_color = is_sel ? pal.accent : pal.border;
+        row_p.border_width = 1.0f;
+        row_p.on_click = [&app, id = m.id] { app.inbox_selected.set(id); };
+        auto row = view(std::move(row_p));
+
+        Props top;
+        top.gap = static_cast<float>(tokens::spacing_sm);
+        top.direction = Direction::row;
+        top.align = Align::center;
+        auto top_row = view(std::move(top));
+        Props from;
+        from.text = m.from;
+        from.text_color = pal.text;
+        from.font_size_pt = tokens::font_body;
+        from.bold = true;
+        from.text_align = Align::start;
+        from.flex_grow = 1.0f;
+        top_row->children.push_back(label(m.from, std::move(from)));
+        Props time;
+        time.text = m.time;
+        time.text_color = pal.text_secondary;
+        time.font_size_pt = tokens::font_caption;
+        time.text_align = Align::end;
+        top_row->children.push_back(label(m.time, std::move(time)));
+        row->children.push_back(std::move(top_row));
+
+        Props subj;
+        subj.text = m.subject;
+        subj.text_color = pal.text;
+        subj.font_size_pt = tokens::font_caption;
+        subj.text_align = Align::start;
+        row->children.push_back(label(m.subject, std::move(subj)));
+
+        list->children.push_back(std::move(row));
+    }
+
+    // ---- Pagination strip ----
+    auto page_strip = pagination(pal, page, total_pages,
+        [&app](int p) { app.inbox_page.set(p); });
+
+    Props body_p;
+    body_p.gap = static_cast<float>(tokens::spacing_md);
+    body_p.direction = Direction::column;
+    auto body = view(std::move(body_p));
+    body->children.push_back(std::move(list));
+    body->children.push_back(std::move(page_strip));
+
+    // ---- Preview column (selected message) ----
+    Props preview_p;
+    preview_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
+                                   static_cast<float>(tokens::spacing_md),
+                                   static_cast<float>(tokens::spacing_md),
+                                   static_cast<float>(tokens::spacing_md)};
+    preview_p.radius = static_cast<float>(tokens::radius_md);
+    preview_p.background = pal.surface;
+    preview_p.border_color = pal.border;
+    preview_p.border_width = 1.0f;
+    preview_p.gap = static_cast<float>(tokens::spacing_sm);
+    preview_p.direction = Direction::column;
+    auto preview = view(std::move(preview_p));
+    int sel = app.inbox_selected.get();
+    const InboxMessage* selected = nullptr;
+    for (const auto& m : all) if (m.id == sel) { selected = &m; break; }
+    if (selected != nullptr) {
+        Props f;
+        f.text = selected->from;
+        f.text_color = pal.text;
+        f.font_size_pt = tokens::font_subtitle;
+        f.bold = true;
+        f.text_align = Align::start;
+        preview->children.push_back(label(selected->from, std::move(f)));
+        Props s;
+        s.text = selected->subject;
+        s.text_color = pal.text_secondary;
+        s.font_size_pt = tokens::font_body;
+        s.text_align = Align::start;
+        preview->children.push_back(label(selected->subject, std::move(s)));
+        Props b;
+        b.text = selected->preview;
+        b.text_color = pal.text;
+        b.font_size_pt = tokens::font_body;
+        b.text_align = Align::start;
+        preview->children.push_back(label(selected->preview, std::move(b)));
+    } else {
+        Props empty;
+        empty.text = L"Select a message";
+        empty.text_color = pal.text_secondary;
+        empty.font_size_pt = tokens::font_body;
+        empty.text_align = Align::center;
+        preview->children.push_back(label(L"Select a message", std::move(empty)));
+    }
+
+    // Row: list | preview.
+    Props row_p;
+    row_p.gap = static_cast<float>(tokens::spacing_md);
+    row_p.direction = Direction::row;
+    row_p.align = Align::start;
+    auto row = view(std::move(row_p));
+
+    // List column gets flex_grow so it fills.
+    Props listcol_p;
+    listcol_p.gap = static_cast<float>(tokens::spacing_md);
+    listcol_p.direction = Direction::column;
+    listcol_p.flex_grow = 1.0f;
+    auto list_col = view(std::move(listcol_p));
+    list_col->children.push_back(std::move(body));
+    row->children.push_back(std::move(list_col));
+
+    Props previewcol_p;
+    previewcol_p.gap = static_cast<float>(tokens::spacing_md);
+    previewcol_p.direction = Direction::column;
+    previewcol_p.width = 220.0f;
+    auto preview_col = view(std::move(previewcol_p));
+    preview_col->children.push_back(std::move(preview));
+    row->children.push_back(std::move(preview_col));
+
+    return section_card(L"Inbox", std::move(row), pal);
+}
+
+// ---- Mini-app: Media Player -------------------------------------------------
+//
+// Now-playing card with cover-art placeholder, title/artist, transport row
+// (back / play-pause / forward), a progress bar driven by a slider, and a
+// volume control. Uses toggle_switch for play state, slider for scrub+volume.
+
+ElementPtr media_player_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    // ---- Cover art: a coloured square with a glyph ----
+    Props art_p;
+    art_p.width = 96.0f;
+    art_p.height = 96.0f;
+    art_p.radius = static_cast<float>(tokens::radius_lg);
+    art_p.background = pal.accent;
+    art_p.text = L"♫";
+    art_p.text_color = pal.on_accent;
+    art_p.font_size_pt = 32.0f;
+    art_p.text_align = Align::center;
+    art_p.enabled = false;
+    auto art = label(L"♫", std::move(art_p));
+
+    // ---- Title + artist (column) ----
+    Props meta_p;
+    meta_p.gap = static_cast<float>(tokens::spacing_xs);
+    meta_p.direction = Direction::column;
+    meta_p.flex_grow = 1.0f;
+    auto meta = view(std::move(meta_p));
+    Props title;
+    title.text = L"Rhapsody in Blue";
+    title.text_color = pal.text;
+    title.font_size_pt = tokens::font_subtitle;
+    title.bold = true;
+    title.text_align = Align::start;
+    meta->children.push_back(label(L"Rhapsody in Blue", std::move(title)));
+    Props artist;
+    artist.text = L"George Gershwin";
+    artist.text_color = pal.text_secondary;
+    artist.font_size_pt = tokens::font_caption;
+    artist.text_align = Align::start;
+    meta->children.push_back(label(L"George Gershwin", std::move(artist)));
+
+    Props top_p;
+    top_p.gap = static_cast<float>(tokens::spacing_md);
+    top_p.direction = Direction::row;
+    top_p.align = Align::center;
+    auto top_row = view(std::move(top_p));
+    top_row->children.push_back(std::move(art));
+    top_row->children.push_back(std::move(meta));
+
+    // ---- Transport row: back / play-pause / forward ----
+    auto mk_transport = [&](const wchar_t* glyph, ClickHandler on_click) {
+        Props p;
+        p.width = 40.0f;
+        p.height = 40.0f;
+        p.radius = 20.0f;
+        p.background = pal.surface;
+        p.hover_background = pal.surface_hover;
+        p.pressed_background = pal.surface_variant;
+        p.border_color = pal.border;
+        p.border_width = 1.0f;
+        p.text = glyph;
+        p.text_color = pal.text;
+        p.font_size_pt = tokens::font_subtitle;
+        p.text_align = Align::center;
+        p.on_click = std::move(on_click);
+        return button(glyph, nullptr, std::move(p));
+    };
+    Props transport_p;
+    transport_p.gap = static_cast<float>(tokens::spacing_sm);
+    transport_p.direction = Direction::row;
+    transport_p.align = Align::center;
+    auto transport = view(std::move(transport_p));
+    transport->children.push_back(mk_transport(L"⏮", [] { /* prev */ }));
+    const bool playing = app.media_playing.get();
+    transport->children.push_back(mk_transport(playing ? L"⏸" : L"▶",
+        [&app] { app.media_playing.set(!app.media_playing.get()); }));
+    transport->children.push_back(mk_transport(L"⏭", [] { /* next */ }));
+
+    // ---- Scrub slider (mock: bound to progress state) ----
+    auto scrub = slider(app.progress.get(), 0.0f, 1.0f,
+        [&app](float v) { app.progress.set(v); });
+
+    // ---- Volume slider ----
+    auto volume = slider(app.media_volume.get(), 0.0f, 100.0f,
+        [&app](float v) { app.media_volume.set(v); });
+
+    Props volume_p;
+    volume_p.gap = static_cast<float>(tokens::spacing_sm);
+    volume_p.direction = Direction::row;
+    volume_p.align = Align::center;
+    auto volume_row = view(std::move(volume_p));
+    Props vol_lbl;
+    vol_lbl.text = L"♫";
+    vol_lbl.text_color = pal.text_secondary;
+    vol_lbl.font_size_pt = tokens::font_body;
+    vol_lbl.text_align = Align::center;
+    vol_lbl.width = 24.0f;
+    volume_row->children.push_back(label(L"♫", std::move(vol_lbl)));
+    volume_row->children.push_back(std::move(volume));
+
+    Props body_p;
+    body_p.gap = static_cast<float>(tokens::spacing_md);
+    body_p.direction = Direction::column;
+    auto body = view(std::move(body_p));
+    body->children.push_back(std::move(top_row));
+    body->children.push_back(std::move(scrub));
+    body->children.push_back(spacer_h(4.0f));
+    // Center the transport row.
+    Props center_p;
+    center_p.direction = Direction::row;
+    center_p.align = Align::center;
+    auto center = view(std::move(center_p));
+    center->children.push_back(std::move(transport));
+    body->children.push_back(std::move(center));
+    body->children.push_back(std::move(volume_row));
+
+    return section_card(L"Media Player", std::move(body), pal);
+}
+
 // ---- Patterns (Tabs, Accordion, SegmentedControl, Pagination, Alert) -----
 
 ElementPtr patterns_section(App& app) {
@@ -1242,6 +1739,7 @@ ElementPtr build(App& app) {
         checkboxes_section(app),
         progress_section(app),
         inputs_section(app),
+        settings_section(app),
     }, static_cast<float>(tokens::spacing_lg), Align::start);
 
     auto right_col = col_view({
@@ -1250,6 +1748,8 @@ ElementPtr build(App& app) {
         layout_section(app),
         pickers_section(app),
         patterns_section(app),
+        inbox_section(app),
+        media_player_section(app),
     }, static_cast<float>(tokens::spacing_lg), Align::start);
 
     auto body = view(std::move(body_p));
@@ -1287,6 +1787,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.view_mode        = app.host.make_state<int>(0);
     app.inbox_page       = app.host.make_state<int>(0);
     app.show_alert       = app.host.make_state<bool>(true);
+    app.settings_email_digest = app.host.make_state<bool>(true);
+    app.settings_auto_update  = app.host.make_state<bool>(false);
+    app.settings_timezone  = app.host.make_state<int>(0);
+    app.settings_language  = app.host.make_state<int>(0);
+    app.inbox_selected     = app.host.make_state<int>(1);
+    app.media_playing      = app.host.make_state<bool>(false);
+    app.media_volume       = app.host.make_state<float>(60.0f);
     app.host.set_root_builder([&app] { return build(app); });
 
     Host::Config cfg;
