@@ -33,6 +33,12 @@ struct App {
     State<int> birthday_year;
     State<int> birthday_month;
     State<int> birthday_day;
+    // Phase C navigation / interaction
+    State<int> active_tab;
+    State<int> expanded_section;
+    State<int> view_mode;
+    State<int> inbox_page;
+    State<bool> show_alert;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -646,6 +652,292 @@ ElementPtr pickers_section(App& app) {
     return section_card(L"Pickers", std::move(body), pal);
 }
 
+struct TabSpec { std::wstring label; std::wstring body; };
+
+ElementPtr tabs(const Palette& pal, std::vector<TabSpec> tabs_in, int active,
+                std::function<void(int)> on_change) {
+    Props outer_p;
+    outer_p.gap = 0.0f;
+    outer_p.direction = Direction::column;
+    auto outer = view(std::move(outer_p));
+
+    // Tab strip — accent text + bold indicates the active tab.
+    Props strip_p;
+    strip_p.gap = 0.0f;
+    strip_p.direction = Direction::row;
+    strip_p.align = Align::stretch;
+    auto strip = view(std::move(strip_p));
+    for (size_t i = 0; i < tabs_in.size(); ++i) {
+        const int idx = static_cast<int>(i);
+        const bool is_active = idx == active;
+        Props tab_p;
+        tab_p.flex_grow = 1.0f;
+        tab_p.height = 36.0f;
+        tab_p.padding = EdgeInsets{0.0f, static_cast<float>(tokens::spacing_sm),
+                                   0.0f, static_cast<float>(tokens::spacing_sm)};
+        tab_p.text = tabs_in[i].label;
+        tab_p.text_color = is_active ? pal.accent : pal.text_secondary;
+        tab_p.font_size_pt = tokens::font_body;
+        tab_p.bold = is_active;
+        tab_p.text_align = Align::center;
+        tab_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
+        auto tab = label(tabs_in[i].label, std::move(tab_p));
+        strip->children.push_back(std::move(tab));
+    }
+    outer->children.push_back(std::move(strip));
+
+    Props div_p;
+    div_p.background = pal.divider;
+    div_p.height = 1.0f;
+    outer->children.push_back(view(std::move(div_p)));
+
+    Props body_p;
+    body_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md), 0.0f, 0.0f, 0.0f};
+    body_p.text_color = pal.text;
+    body_p.font_size_pt = tokens::font_body;
+    body_p.text_align = Align::start;
+    const std::wstring content = (active >= 0 && active < static_cast<int>(tabs_in.size()))
+                                     ? tabs_in[active].body
+                                     : L"";
+    outer->children.push_back(label(content, std::move(body_p)));
+
+    return outer;
+}
+
+ElementPtr accordion(const Palette& pal, std::vector<TabSpec> items,
+                     int expanded, std::function<void(int)> on_toggle) {
+    Props outer_p;
+    outer_p.gap = static_cast<float>(tokens::spacing_xs);
+    outer_p.direction = Direction::column;
+    auto outer = view(std::move(outer_p));
+
+    for (size_t i = 0; i < items.size(); ++i) {
+        const int idx = static_cast<int>(i);
+        const bool is_open = idx == expanded;
+
+        Props item_p;
+        item_p.gap = 0.0f;
+        item_p.direction = Direction::column;
+        item_p.radius = static_cast<float>(tokens::radius_md);
+        item_p.border_color = pal.border;
+        item_p.border_width = 1.0f;
+        item_p.background = pal.surface;
+        item_p.padding = EdgeInsets{0.0f, 0.0f, 0.0f, 0.0f};
+        auto item = view(std::move(item_p));
+
+        Props header_p;
+        header_p.gap = static_cast<float>(tokens::spacing_sm);
+        header_p.direction = Direction::row;
+        header_p.align = Align::center;
+        header_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
+                                      static_cast<float>(tokens::spacing_md),
+                                      static_cast<float>(tokens::spacing_md),
+                                      static_cast<float>(tokens::spacing_md)};
+        header_p.on_click = [on_toggle, idx, is_open] {
+            if (on_toggle) on_toggle(is_open ? -1 : idx);
+        };
+        auto header = view(std::move(header_p));
+
+        Props title_p;
+        title_p.text = items[i].label;
+        title_p.text_color = pal.text;
+        title_p.font_size_pt = tokens::font_body;
+        title_p.bold = true;
+        title_p.text_align = Align::start;
+        title_p.flex_grow = 1.0f;
+        header->children.push_back(label(items[i].label, std::move(title_p)));
+
+        Props chev_p;
+        chev_p.text = is_open ? L"v" : L">";
+        chev_p.text_color = pal.text_secondary;
+        chev_p.font_size_pt = tokens::font_caption;
+        chev_p.text_align = Align::center;
+        header->children.push_back(label(chev_p.text, std::move(chev_p)));
+
+        item->children.push_back(std::move(header));
+
+        if (is_open) {
+            Props body_p;
+            body_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
+                                        static_cast<float>(tokens::spacing_md),
+                                        static_cast<float>(tokens::spacing_md),
+                                        static_cast<float>(tokens::spacing_md)};
+            body_p.text_color = pal.text_secondary;
+            body_p.font_size_pt = tokens::font_body;
+            body_p.text_align = Align::start;
+            item->children.push_back(label(items[i].body, std::move(body_p)));
+        }
+        outer->children.push_back(std::move(item));
+    }
+    return outer;
+}
+
+ElementPtr segmented_control(const Palette& pal, std::vector<std::wstring> options,
+                             int selected, std::function<void(int)> on_change) {
+    Props outer_p;
+    outer_p.gap = 0.0f;
+    outer_p.direction = Direction::row;
+    outer_p.radius = static_cast<float>(tokens::radius_control);
+    outer_p.border_color = pal.border;
+    outer_p.border_width = 1.0f;
+    outer_p.padding = EdgeInsets{0.0f, 0.0f, 0.0f, 0.0f};
+    outer_p.align = Align::stretch;
+    auto outer = view(std::move(outer_p));
+
+    for (size_t i = 0; i < options.size(); ++i) {
+        const int idx = static_cast<int>(i);
+        const bool is_sel = idx == selected;
+        Props seg_p;
+        seg_p.flex_grow = 1.0f;
+        seg_p.height = static_cast<float>(tokens::control_height_sm);
+        seg_p.text = options[i];
+        seg_p.text_color = is_sel ? pal.on_accent : pal.text;
+        seg_p.background = is_sel ? pal.accent : Color{};
+        seg_p.font_size_pt = tokens::font_caption;
+        seg_p.text_align = Align::center;
+        seg_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
+        auto seg = label(options[i], std::move(seg_p));
+        outer->children.push_back(std::move(seg));
+    }
+    return outer;
+}
+
+ElementPtr pagination(const Palette& pal, int current, int total,
+                      std::function<void(int)> on_change) {
+    Props outer_p;
+    outer_p.gap = static_cast<float>(tokens::spacing_xs);
+    outer_p.direction = Direction::row;
+    outer_p.align = Align::center;
+    auto outer = view(std::move(outer_p));
+
+    auto mk_btn = [&](const std::wstring& txt, bool enabled, int next) {
+        Props p;
+        p.width = 28.0f;
+        p.height = 28.0f;
+        p.radius = static_cast<float>(tokens::radius_sm);
+        p.text = txt;
+        p.text_color = enabled ? pal.text : pal.text_secondary;
+        p.font_size_pt = tokens::font_body;
+        p.text_align = Align::center;
+        p.enabled = enabled;
+        p.on_click = [on_change, next] { if (on_change) on_change(next); };
+        return label(txt, std::move(p));
+    };
+    outer->children.push_back(mk_btn(L"<", current > 0, current - 1));
+    for (int p = 0; p < total; ++p) {
+        const bool is_cur = p == current;
+        Props pg_p;
+        pg_p.width = 28.0f;
+        pg_p.height = 28.0f;
+        pg_p.radius = static_cast<float>(tokens::radius_sm);
+        pg_p.text = std::to_wstring(p + 1);
+        pg_p.text_color = is_cur ? pal.on_accent : pal.text;
+        pg_p.background = is_cur ? pal.accent : Color{};
+        pg_p.font_size_pt = tokens::font_caption;
+        pg_p.text_align = Align::center;
+        pg_p.on_click = [on_change, p] { if (on_change) on_change(p); };
+        outer->children.push_back(label(pg_p.text, std::move(pg_p)));
+    }
+    outer->children.push_back(mk_btn(L">", current < total - 1, current + 1));
+    return outer;
+}
+
+ElementPtr alert(const Palette& pal, const wchar_t* kind, const wchar_t* text,
+                 ClickHandler on_dismiss) {
+    (void)kind;
+    Props p;
+    p.gap = static_cast<float>(tokens::spacing_md);
+    p.direction = Direction::row;
+    p.align = Align::center;
+    p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
+                           static_cast<float>(tokens::spacing_md),
+                           static_cast<float>(tokens::spacing_md),
+                           static_cast<float>(tokens::spacing_md)};
+    p.radius = static_cast<float>(tokens::radius_md);
+    p.background = pal.surface_variant;
+    auto row = view(std::move(p));
+
+    Props txt;
+    txt.text = text;
+    txt.text_color = pal.text;
+    txt.font_size_pt = tokens::font_body;
+    txt.text_align = Align::start;
+    txt.flex_grow = 1.0f;
+    row->children.push_back(label(text, std::move(txt)));
+
+    Props x_p;
+    x_p.width = 24.0f;
+    x_p.height = 24.0f;
+    x_p.text = L"x";
+    x_p.text_color = pal.text_secondary;
+    x_p.font_size_pt = tokens::font_caption;
+    x_p.text_align = Align::center;
+    x_p.on_click = std::move(on_dismiss);
+    row->children.push_back(label(x_p.text, std::move(x_p)));
+
+    return row;
+}
+
+// ---- Patterns (Tabs, Accordion, SegmentedControl, Pagination, Alert) -----
+
+ElementPtr patterns_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    std::vector<TabSpec> tab_specs = {
+        {L"Overview", L"A snapshot of recent activity — keep an eye on what matters."},
+        {L"Activity", L"Your last 10 actions show up here, newest at the top."},
+        {L"Settings", L"Tweak the things only you can see — your account, your data."},
+    };
+    auto tab_block = tabs(pal, tab_specs, app.active_tab.get(),
+        [&app](int i) { app.active_tab.set(i); });
+
+    std::vector<TabSpec> acc_specs = {
+        {L"What is WinFlux?",      L"A single-HWND C++20 UI framework with a declarative scene tree."},
+        {L"How does damage work?", L"The diff is structural; hover/press/focus feed the partial repaint."},
+        {L"License?",              L"This sample is MIT — adopt the pattern, not the project."},
+    };
+    auto acc_block = accordion(pal, acc_specs, app.expanded_section.get(),
+        [&app](int i) { app.expanded_section.set(i); });
+
+    auto seg = segmented_control(pal,
+        std::vector<std::wstring>{L"List", L"Grid", L"Compact"},
+        app.view_mode.get(),
+        [&app](int i) { app.view_mode.set(i); });
+
+    auto pag = pagination(pal, app.inbox_page.get(), 6,
+        [&app](int i) { app.inbox_page.set(i); });
+
+    auto dismiss_alert = [&app] { app.show_alert.set(false); };
+    ElementPtr al;
+    if (app.show_alert.get()) {
+        al = alert(pal, L"info", L"This alert dismisses with the x button.", dismiss_alert);
+    } else {
+        Props empty_p;
+        empty_p.height = 1.0f;
+        al = view(std::move(empty_p));
+    }
+
+    Props caption_p;
+    caption_p.text_color = pal.text_secondary;
+    caption_p.font_size_pt = tokens::font_caption;
+    caption_p.text_align = Align::start;
+
+    auto body = col_view({
+        label(L"Tabs", caption_p),
+        tab_block,
+        label(L"Accordion", caption_p),
+        acc_block,
+        label(L"Segmented control", caption_p),
+        seg,
+        label(L"Pagination", caption_p),
+        pag,
+        label(L"Alert (dismissible)", caption_p),
+        al,
+    }, static_cast<float>(tokens::spacing_md));
+
+    return section_card(L"Patterns", std::move(body), pal);
+}
+
 // ---- Typography ------------------------------------------------------------
 
 ElementPtr typography_section(App& app) {
@@ -957,6 +1249,7 @@ ElementPtr build(App& app) {
         containers_section(app),
         layout_section(app),
         pickers_section(app),
+        patterns_section(app),
     }, static_cast<float>(tokens::spacing_lg), Align::start);
 
     auto body = view(std::move(body_p));
@@ -989,6 +1282,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.birthday_year  = app.host.make_state<int>(2026);
     app.birthday_month = app.host.make_state<int>(8);   // September (0-indexed)
     app.birthday_day   = app.host.make_state<int>(14);
+    app.active_tab       = app.host.make_state<int>(0);
+    app.expanded_section = app.host.make_state<int>(0);
+    app.view_mode        = app.host.make_state<int>(0);
+    app.inbox_page       = app.host.make_state<int>(0);
+    app.show_alert       = app.host.make_state<bool>(true);
     app.host.set_root_builder([&app] { return build(app); });
 
     Host::Config cfg;
