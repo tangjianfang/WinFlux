@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <algorithm>
+
 #include <flux/flux.hpp>
 
 using namespace flux;
@@ -25,6 +27,12 @@ struct App {
     State<std::wstring> input_email;
     State<float> volume;
     State<bool> dark_mode;
+    // Phase B pickers
+    State<int> theme_pick;
+    State<int> accent_pick;
+    State<int> birthday_year;
+    State<int> birthday_month;
+    State<int> birthday_day;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -307,6 +315,201 @@ ElementPtr progress_section(App& app) {
     return section_card(L"Progress", std::move(body), pal);
 }
 
+// ---- Composite pickers ----------------------------------------------------
+//
+// These don't add new element types — each picker is a container whose
+// children carry their own click handlers. The framework's existing click
+// dispatch walks up from the clicked leaf to the nearest interactive
+// ancestor, so per-option clicks reach the right handler without any new
+// infrastructure. Each child knows its own visual state (selected/not) at
+// build time.
+
+ElementPtr radio_option(const Palette& pal, const wchar_t* text, bool selected,
+                        ClickHandler on_select) {
+    Props row_p;
+    row_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_xs),
+                               static_cast<float>(tokens::spacing_xs),
+                               static_cast<float>(tokens::spacing_xs),
+                               static_cast<float>(tokens::spacing_xs)};
+    row_p.gap = static_cast<float>(tokens::spacing_sm);
+    row_p.direction = Direction::row;
+    row_p.align = Align::center;
+    row_p.radius = static_cast<float>(tokens::radius_sm);
+    row_p.on_click = std::move(on_select);
+    auto row = view(std::move(row_p));
+
+    Props circle_p;
+    circle_p.width = 16.0f;
+    circle_p.height = 16.0f;
+    circle_p.radius = 8.0f;
+    circle_p.border_color = selected ? pal.accent : pal.border;
+    circle_p.border_width = 1.5f;
+    if (selected) circle_p.background = pal.accent;
+    row->children.push_back(view(std::move(circle_p)));
+
+    Props label_p;
+    label_p.text_color = pal.text;
+    label_p.font_size_pt = tokens::font_body;
+    label_p.text_align = Align::start;
+    row->children.push_back(label(std::wstring(text), std::move(label_p)));
+
+    return row;
+}
+
+ElementPtr radio_group(const Palette& pal, std::vector<std::wstring> options,
+                       int selected, std::function<void(int)> on_change) {
+    Props col_p;
+    col_p.gap = static_cast<float>(tokens::spacing_xs);
+    col_p.direction = Direction::column;
+    auto col = view(std::move(col_p));
+    for (size_t i = 0; i < options.size(); ++i) {
+        const int idx = static_cast<int>(i);
+        const bool is_sel = idx == selected;
+        auto handler = [on_change, idx] { if (on_change) on_change(idx); };
+        col->children.push_back(
+            radio_option(pal, options[i].c_str(), is_sel, std::move(handler)));
+    }
+    return col;
+}
+
+ElementPtr color_swatch(const Palette& pal, Color c, bool selected,
+                        ClickHandler on_select) {
+    Props p;
+    p.width = 36.0f;
+    p.height = 36.0f;
+    p.radius = static_cast<float>(tokens::radius_md);
+    p.background = c;
+    p.border_color = selected ? pal.accent : pal.border;
+    p.border_width = selected ? 2.5f : 1.0f;
+    p.on_click = std::move(on_select);
+    return view(std::move(p));
+}
+
+ElementPtr color_picker(const Palette& pal, std::vector<Color> swatches,
+                        int selected, std::function<void(int)> on_change,
+                        int per_row = 6) {
+    // Wrap-less grid: stack rows of `per_row` swatches. The framework has
+    // only row/column layouts, so manual row construction is the cleanest
+    // expression. per_row=6 gives a tidy 6-wide grid for typical palettes.
+    Props outer_p;
+    outer_p.gap = static_cast<float>(tokens::spacing_sm);
+    outer_p.direction = Direction::column;
+    auto outer = view(std::move(outer_p));
+    for (size_t i = 0; i < swatches.size(); i += static_cast<size_t>(per_row)) {
+        Props row_p;
+        row_p.gap = static_cast<float>(tokens::spacing_sm);
+        row_p.direction = Direction::row;
+        auto row = view(std::move(row_p));
+        for (size_t j = i; j < std::min(i + static_cast<size_t>(per_row), swatches.size()); ++j) {
+            const int idx = static_cast<int>(j);
+            auto handler = [on_change, idx] { if (on_change) on_change(idx); };
+            row->children.push_back(
+                color_swatch(pal, swatches[j], idx == selected, std::move(handler)));
+        }
+        outer->children.push_back(std::move(row));
+    }
+    return outer;
+}
+
+namespace {
+int days_in_month(int year, int month) {
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month == 1) {   // February
+        const bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        return leap ? 29 : 28;
+    }
+    return days[month];
+}
+int first_weekday(int year, int month) {
+    // Zeller's congruence — returns 0=Sunday..6=Saturday.
+    int m = month + 1;
+    int y = year;
+    if (m <= 2) { m += 12; y -= 1; }
+    const int k = y % 100;
+    const int j = y / 100;
+    int h = (1 + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
+    return (h + 6) % 7;   // shift so 0=Sunday
+}
+} // namespace
+
+ElementPtr date_picker(const Palette& pal, int year, int month, int day,
+                       std::function<void(int, int, int)> on_change) {
+    Props outer_p;
+    outer_p.gap = static_cast<float>(tokens::spacing_xs);
+    outer_p.direction = Direction::column;
+    auto outer = view(std::move(outer_p));
+
+    // Month header: "September 2026"
+    static const wchar_t* month_names[] = {
+        L"January", L"February", L"March", L"April", L"May", L"June",
+        L"July", L"August", L"September", L"October", L"November", L"December"};
+    Props header_p;
+    header_p.text_color = pal.text;
+    header_p.font_size_pt = tokens::font_subtitle;
+    header_p.bold = true;
+    header_p.text_align = Align::start;
+    auto header_text = std::wstring(month_names[std::clamp(month, 0, 11)]) + L" " + std::to_wstring(year);
+    header_p.text = header_text;
+    outer->children.push_back(label(header_text, std::move(header_p)));
+
+    // Day-of-week header row.
+    static const wchar_t* dow[] = {L"S", L"M", L"T", L"W", L"T", L"F", L"S"};
+    Props dow_row_p;
+    dow_row_p.gap = static_cast<float>(tokens::spacing_xs);
+    dow_row_p.direction = Direction::row;
+    auto dow_row = view(std::move(dow_row_p));
+    for (int i = 0; i < 7; ++i) {
+        Props d;
+        d.width = 28.0f;
+        d.height = 22.0f;
+        d.text = dow[i];
+        d.text_color = pal.text_secondary;
+        d.font_size_pt = tokens::font_caption;
+        d.bold = true;
+        d.text_align = Align::center;
+        auto cell = label(dow[i], std::move(d));
+        dow_row->children.push_back(std::move(cell));
+    }
+    outer->children.push_back(std::move(dow_row));
+
+    // Day grid: 6 rows × 7 cols.
+    const int first = first_weekday(year, month);
+    const int total = days_in_month(year, month);
+    int cell_day = 1 - first;   // may be <= 0 (leading blanks)
+    for (int r = 0; r < 6; ++r) {
+        Props row_p;
+        row_p.gap = static_cast<float>(tokens::spacing_xs);
+        row_p.direction = Direction::row;
+        auto row = view(std::move(row_p));
+        for (int c = 0; c < 7; ++c, ++cell_day) {
+            Props cell_p;
+            cell_p.width = 28.0f;
+            cell_p.height = 28.0f;
+            cell_p.radius = static_cast<float>(tokens::radius_sm);
+            cell_p.text_align = Align::center;
+            cell_p.font_size_pt = tokens::font_caption;
+            const bool in_month = cell_day >= 1 && cell_day <= total;
+            if (!in_month) {
+                cell_p.text_color = pal.divider;
+                cell_p.text = L"";
+                cell_p.enabled = false;
+            } else {
+                cell_p.text = std::to_wstring(cell_day);
+                cell_p.text_color = cell_day == day ? pal.on_accent : pal.text;
+                cell_p.background = cell_day == day ? pal.accent : Color{};
+                cell_p.enabled = true;
+                const int captured_day = cell_day;
+                cell_p.on_click = [year, month, captured_day, on_change] {
+                    if (on_change) on_change(year, month, captured_day);
+                };
+            }
+            row->children.push_back(label(cell_p.text, std::move(cell_p)));
+        }
+        outer->children.push_back(std::move(row));
+    }
+    return outer;
+}
+
 // ---- Inputs (form primitives) ---------------------------------------------
 //
 // TextInput accepts text via WM_CHAR/VK_BACK dispatched to the element at
@@ -388,6 +591,59 @@ ElementPtr inputs_section(App& app) {
     }, static_cast<float>(tokens::spacing_md));
 
     return section_card(L"Inputs", std::move(body), pal);
+}
+
+// ---- Pickers (RadioGroup, ColorPicker, DatePicker) -------------------------
+
+ElementPtr pickers_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    std::vector<std::wstring> theme_options = {L"Light", L"Dark", L"High contrast"};
+    auto theme_radio = radio_group(pal, theme_options, app.theme_pick.get(),
+        [&app](int i) { app.theme_pick.set(i); });
+
+    std::vector<Color> swatches = {
+        rgb(220, 100, 40),    // orange
+        rgb(40, 140, 220),    // blue
+        rgb(60, 180, 100),    // green
+        rgb(200, 80, 80),     // red
+        rgb(180, 80, 180),    // magenta
+        rgb(220, 180, 40),    // amber
+        rgb(80, 80, 80),      // gray
+        rgb(140, 100, 60),    // brown
+        rgb(60, 60, 200),     // indigo
+        rgb(40, 160, 160),    // teal
+        rgb(255, 130, 60),    // peach
+        rgb(100, 200, 200),   // sky
+    };
+    auto swatch_picker = color_picker(pal, swatches, app.accent_pick.get(),
+        [&app](int i) { app.accent_pick.set(i); });
+
+    auto cal = date_picker(pal,
+        app.birthday_year.get(),
+        app.birthday_month.get(),
+        app.birthday_day.get(),
+        [&app](int y, int m, int d) {
+            app.birthday_year.set(y);
+            app.birthday_month.set(m);
+            app.birthday_day.set(d);
+        });
+
+    Props caption_p;
+    caption_p.text_color = pal.text_secondary;
+    caption_p.font_size_pt = tokens::font_caption;
+    caption_p.text_align = Align::start;
+
+    auto body = col_view({
+        label(L"Theme (radio)", caption_p),
+        theme_radio,
+        label(L"Accent (swatches)", caption_p),
+        swatch_picker,
+        label(L"Birthday (calendar)", caption_p),
+        cal,
+    }, static_cast<float>(tokens::spacing_md));
+
+    return section_card(L"Pickers", std::move(body), pal);
 }
 
 // ---- Typography ------------------------------------------------------------
@@ -700,6 +956,7 @@ ElementPtr build(App& app) {
         typography_section(app),
         containers_section(app),
         layout_section(app),
+        pickers_section(app),
     }, static_cast<float>(tokens::spacing_lg), Align::start);
 
     auto body = view(std::move(body_p));
@@ -727,6 +984,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.input_email = app.host.make_state<std::wstring>(L"");
     app.volume = app.host.make_state<float>(40.0f);
     app.dark_mode = app.host.make_state<bool>(false);
+    app.theme_pick = app.host.make_state<int>(1);
+    app.accent_pick = app.host.make_state<int>(2);
+    app.birthday_year  = app.host.make_state<int>(2026);
+    app.birthday_month = app.host.make_state<int>(8);   // September (0-indexed)
+    app.birthday_day   = app.host.make_state<int>(14);
     app.host.set_root_builder([&app] { return build(app); });
 
     Host::Config cfg;
