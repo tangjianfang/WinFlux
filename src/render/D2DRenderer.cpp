@@ -1,7 +1,9 @@
 #include <flux/D2DRenderer.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace flux {
 
@@ -25,12 +27,47 @@ unsigned format_key(float size_pt, bool bold) noexcept {
 
 float pt_to_dip(float pt) noexcept { return pt * 96.0f / 72.0f; }
 
+// ---- Icon geometry helpers (24x24 stroke grid) -------------------------
+// Polyline / circle figure builders shared by every icon kind. `filled`
+// figures are accumulated into the icon's fill geometry; hollow outlines
+// into the stroke geometry.
+void fig_poly(ID2D1GeometrySink* s, const D2D1_POINT_2F* pts, UINT n,
+              D2D1_FIGURE_END end) noexcept {
+    s->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_HOLLOW);
+    if (n > 1) s->AddLines(pts + 1, n - 1);
+    s->EndFigure(end);
+}
+
+void fig_poly_filled(ID2D1GeometrySink* s, const D2D1_POINT_2F* pts, UINT n) noexcept {
+    s->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);
+    if (n > 1) s->AddLines(pts + 1, n - 1);
+    s->EndFigure(D2D1_FIGURE_END_CLOSED);
+}
+
+void fig_circle(ID2D1GeometrySink* s, float cx, float cy, float r, bool filled) noexcept {
+    s->BeginFigure(D2D1::Point2F(cx + r, cy),
+                   filled ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
+    D2D1_ARC_SEGMENT arc{};
+    arc.point = D2D1::Point2F(cx - r, cy);
+    arc.size = D2D1::SizeF(r, r);
+    arc.sweepDirection = D2D1_SWEEP_DIRECTION_CLOCKWISE;
+    arc.arcSize = D2D1_ARC_SIZE_SMALL;
+    s->AddArc(arc);
+    arc.point = D2D1::Point2F(cx + r, cy);
+    s->AddArc(arc);
+    s->EndFigure(filled ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+}
+
 } // namespace
 
 D2DRenderer::~D2DRenderer() {
     brushes_.clear();
     formats_.clear();
     text_layouts_.clear();
+    icon_geos_.clear();
+    icon_fill_geos_.clear();
+    gradients_.clear();
+    icon_stroke_.Reset();
     dwrite_.Reset();
     last_rt_.Reset();
 }
@@ -75,6 +112,10 @@ void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
     if (last_rt_.Get() != frame_rt_) {
         brushes_.clear();
         text_layouts_.clear();   // IDWriteTextLayout holds the dwrite factory; safe to keep, but rebind to new format pointer if we ever cache that.
+        icon_geos_.clear();
+        icon_fill_geos_.clear();
+        gradients_.clear();
+        icon_stroke_.Reset();
         last_rt_ = frame_rt_;   // AddRefs; releases the previous (possibly dead) RT
         // The new RT starts with the identity transform; any cached transform
         // state from the old (now-dead) RT doesn't carry over.
@@ -195,42 +236,107 @@ void D2DRenderer::fill_rect(Rect r, Color c) noexcept {
     }
 }
 
-void D2DRenderer::fill_round_rect(Rect r, float radius, Color c) noexcept {
+void D2DRenderer::fill_round_rect(Rect r, float radius, Color c, float alpha) noexcept {
     if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
+        b->SetOpacity(alpha);
         const float clamped = std::min(radius, std::min(r.w, r.h) * 0.5f);
         frame_rt_->FillRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b);
     }
 }
 
-void D2DRenderer::draw_round_rect(Rect r, float radius, Color c, float stroke_width) noexcept {
+void D2DRenderer::draw_round_rect(Rect r, float radius, Color c, float stroke_width,
+                                  float alpha) noexcept {
     if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
+        b->SetOpacity(alpha);
         const float clamped = std::min(radius, std::min(r.w, r.h) * 0.5f);
         frame_rt_->DrawRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b, stroke_width);
     }
 }
 
-void D2DRenderer::draw_line(float x1, float y1, float x2, float y2, Color c, float stroke_width) noexcept {
+void D2DRenderer::draw_line(float x1, float y1, float x2, float y2, Color c,
+                            float stroke_width, float alpha) noexcept {
     if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
+        b->SetOpacity(alpha);
         frame_rt_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), b, stroke_width);
     }
 }
 
 void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
-                            bool bold, Align halign) noexcept {
+                            bool bold, Align halign, float alpha) noexcept {
     if (frame_rt_ == nullptr || text.empty()) return;
     ID2D1SolidColorBrush* b = brush(c);
     IDWriteTextFormat* fmt = format(size_pt, bold);
     if (b == nullptr || fmt == nullptr) return;
 
+    b->SetOpacity(alpha);
     fmt->SetTextAlignment(halign == Align::center ? DWRITE_TEXT_ALIGNMENT_CENTER
                         : halign == Align::end    ? DWRITE_TEXT_ALIGNMENT_TRAILING
                                                   : DWRITE_TEXT_ALIGNMENT_LEADING);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     frame_rt_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, to_rect(r), b,
                          D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+}
+
+ID2D1LinearGradientBrush* D2DRenderer::gradient_brush(const Gradient& g) noexcept {
+    if (frame_rt_ == nullptr) return nullptr;
+    const unsigned long long key =
+        (static_cast<unsigned long long>(color_key(g.from)) << 24u) | color_key(g.to);
+    auto it = gradients_.find(key);
+    if (it != gradients_.end()) return it->second.Get();
+
+    const D2D1_GRADIENT_STOP stops[2] = {
+        {0.0f, to_d2d(g.from)},
+        {1.0f, to_d2d(g.to)},
+    };
+    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> coll;
+    if (FAILED(frame_rt_->CreateGradientStopCollection(
+            stops, 2, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, coll.GetAddressOf()))) {
+        return nullptr;
+    }
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> b;
+    // Start/end points are in the RT's current (world-transformed) space;
+    // they are re-pointed per fill so the cached brush serves every rect.
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES props{};
+    props.startPoint = D2D1::Point2F(0.0f, 0.0f);
+    props.endPoint = D2D1::Point2F(1.0f, 0.0f);
+    if (FAILED(frame_rt_->CreateLinearGradientBrush(props, coll.Get(), b.GetAddressOf()))) {
+        return nullptr;
+    }
+    auto* raw = b.Get();
+    gradients_.emplace(key, std::move(b));
+    return raw;
+}
+
+void D2DRenderer::fill_round_rect_gradient(Rect r, float radius, const Gradient& g,
+                                           float alpha) noexcept {
+    if (frame_rt_ == nullptr) return;
+    ID2D1LinearGradientBrush* b = gradient_brush(g);
+    if (b == nullptr) return;
+    b->SetOpacity(alpha);
+    b->SetStartPoint(D2D1::Point2F(r.x, r.y + r.h * 0.5f));
+    b->SetEndPoint(D2D1::Point2F(r.x + r.w, r.y + r.h * 0.5f));
+    const float clamped = std::min(radius, std::min(r.w, r.h) * 0.5f);
+    frame_rt_->FillRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b);
+}
+
+void D2DRenderer::draw_shadow(Rect r, float radius, int elevation) noexcept {
+    if (elevation <= 0 || frame_rt_ == nullptr) return;
+    const int blurs[3] = {tokens::shadow_blur_sm, tokens::shadow_blur_md,
+                          tokens::shadow_blur_lg};
+    const float blur = static_cast<float>(blurs[std::clamp(elevation, 1, 3) - 1]);
+    constexpr int kLayers = 3;
+    const float dy = tokens::shadow_offset_y * static_cast<float>(elevation);
+    for (int i = 1; i <= kLayers; ++i) {
+        const float grow = blur * static_cast<float>(i) / static_cast<float>(kLayers);
+        const float a = tokens::shadow_alpha * static_cast<float>(elevation) *
+                        (1.0f - static_cast<float>(i - 1) / static_cast<float>(kLayers));
+        fill_round_rect(Rect{r.x - grow, r.y - grow + dy, r.w + 2.0f * grow,
+                             r.h + 2.0f * grow},
+                        radius + grow, Color{0, 0, 0}, a);
+    }
 }
 
 std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
@@ -265,6 +371,210 @@ std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
     DWRITE_TEXT_METRICS m{};
     slot->GetMetrics(&m);
     return {std::ceil(m.width), std::ceil(m.height)};
+}
+
+ID2D1StrokeStyle* D2DRenderer::icon_stroke() noexcept {
+    if (icon_stroke_ != nullptr) return icon_stroke_.Get();
+    if (frame_rt_ == nullptr) return nullptr;
+    // Round caps/joins keep 45-degree chevrons and checks from sprouting
+    // spikes at 1.5-2 px stroke widths.
+    D2D1_STROKE_STYLE_PROPERTIES props{};
+    props.startCap = D2D1_CAP_STYLE_ROUND;
+    props.endCap = D2D1_CAP_STYLE_ROUND;
+    props.dashCap = D2D1_CAP_STYLE_ROUND;
+    props.lineJoin = D2D1_LINE_JOIN_ROUND;
+    props.miterLimit = 2.0f;
+    ID2D1Factory* fac = nullptr;
+    frame_rt_->GetFactory(&fac);
+    if (fac == nullptr) return nullptr;
+    if (FAILED(fac->CreateStrokeStyle(props, nullptr, 0, icon_stroke_.GetAddressOf()))) {
+        return nullptr;
+    }
+    return icon_stroke_.Get();
+}
+
+// Builds the stroke outline + fill accents for one icon on the 24x24 grid.
+// Coordinates follow the Feather/24-grid convention (2 px baseline stroke).
+bool D2DRenderer::build_icon(IconKind kind) noexcept {
+    if (frame_rt_ == nullptr) return false;
+    ID2D1Factory* fac = nullptr;
+    frame_rt_->GetFactory(&fac);
+    if (fac == nullptr) return false;
+
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> stroke;
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> fill;
+    if (FAILED(fac->CreatePathGeometry(stroke.GetAddressOf()))) return false;
+    const bool has_fill = kind == IconKind::play || kind == IconKind::pause ||
+                          kind == IconKind::skip_prev || kind == IconKind::skip_next ||
+                          kind == IconKind::edit || kind == IconKind::info ||
+                          kind == IconKind::warning;
+    if (has_fill && FAILED(fac->CreatePathGeometry(fill.GetAddressOf()))) return false;
+
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(stroke->Open(sink.GetAddressOf()))) return false;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> fsink;
+    if (has_fill && FAILED(fill->Open(fsink.GetAddressOf()))) return false;
+
+    using P = D2D1_POINT_2F;
+    auto pts = [](std::initializer_list<D2D1_POINT_2F> l) {
+        return std::vector<D2D1_POINT_2F>(l);
+    };
+    const auto line = [&](std::initializer_list<D2D1_POINT_2F> l) {
+        const std::vector<P> v = pts(l);
+        fig_poly(sink.Get(), v.data(), static_cast<UINT>(v.size()), D2D1_FIGURE_END_OPEN);
+    };
+    const auto closed = [&](std::initializer_list<D2D1_POINT_2F> l) {
+        const std::vector<P> v = pts(l);
+        fig_poly(sink.Get(), v.data(), static_cast<UINT>(v.size()), D2D1_FIGURE_END_CLOSED);
+    };
+    const auto circle = [&](float cx, float cy, float r) {
+        fig_circle(sink.Get(), cx, cy, r, false);
+    };
+    const auto dot = [&](float cx, float cy, float r) {
+        fig_circle(fsink.Get(), cx, cy, r, true);
+    };
+    const auto solid = [&](std::initializer_list<D2D1_POINT_2F> l) {
+        const std::vector<P> v = pts(l);
+        fig_poly_filled(fsink.Get(), v.data(), static_cast<UINT>(v.size()));
+    };
+
+    switch (kind) {
+    case IconKind::chevron_down:  line({P{15, 6},  P{9, 12},  P{15, 18}}); break;
+    case IconKind::chevron_up:    line({P{9, 18},  P{15, 12}, P{9, 6}});   break;
+    case IconKind::chevron_left:  line({P{14, 5},  P{7, 12},  P{14, 19}}); break;
+    case IconKind::chevron_right: line({P{10, 5},  P{17, 12}, P{10, 19}}); break;
+    case IconKind::close:
+        line({P{6, 6},  P{18, 18}});
+        line({P{18, 6}, P{6, 18}});
+        break;
+    case IconKind::check: line({P{5, 13}, P{10, 18}, P{19, 7}}); break;
+    case IconKind::search:
+        circle(11, 11, 7);
+        line({P{16.5f, 16.5f}, P{21, 21}});
+        break;
+    case IconKind::plus:
+        line({P{12, 5}, P{12, 19}});
+        line({P{5, 12}, P{19, 12}});
+        break;
+    case IconKind::minus: line({P{5, 12}, P{19, 12}}); break;
+    case IconKind::hamburger:
+        line({P{4, 7},  P{20, 7}});
+        line({P{4, 12}, P{20, 12}});
+        line({P{4, 17}, P{20, 17}});
+        break;
+    case IconKind::user:
+        circle(12, 8, 4);
+        line({P{5, 20}, P{5, 18}, P{7, 15}, P{12, 14}, P{17, 15}, P{19, 18}, P{19, 20}});
+        break;
+    case IconKind::trash:
+        line({P{5, 7}, P{19, 7}});
+        line({P{9, 7}, P{9, 5}, P{15, 5}, P{15, 7}});
+        line({P{7, 7}, P{8, 20}, P{16, 20}, P{17, 7}});
+        break;
+    case IconKind::edit:
+        closed({P{4, 20}, P{5, 16}, P{16, 5}, P{19, 8}, P{8, 19}});
+        solid({P{4.6f, 19}, P{5.4f, 16.4f}, P{16, 5.8f}, P{18.2f, 8}, P{7.6f, 18.6f}});
+        break;
+    case IconKind::arrow_right:
+        line({P{4, 12}, P{20, 12}});
+        line({P{13, 5}, P{20, 12}, P{13, 19}});
+        break;
+    case IconKind::calendar:
+        closed({P{4, 6}, P{20, 6}, P{20, 20}, P{4, 20}});
+        line({P{4, 10}, P{20, 10}});
+        line({P{8, 4}, P{8, 8}});
+        line({P{16, 4}, P{16, 8}});
+        break;
+    case IconKind::inbox:
+        closed({P{4, 13}, P{8, 6}, P{16, 6}, P{20, 13}, P{20, 18}, P{4, 18}});
+        line({P{4, 13}, P{10, 13}, P{12, 16}, P{14, 13}, P{20, 13}});
+        break;
+    case IconKind::play:
+        solid({P{8, 5}, P{19, 12}, P{8, 19}});
+        break;
+    case IconKind::pause:
+        solid({P{7, 5}, P{10.5f, 5}, P{10.5f, 19}, P{7, 19}});
+        solid({P{13.5f, 5}, P{17, 5}, P{17, 19}, P{13.5f, 19}});
+        break;
+    case IconKind::skip_prev:
+        solid({P{19, 5}, P{9, 12}, P{19, 19}});
+        line({P{6, 5}, P{6, 19}});
+        break;
+    case IconKind::skip_next:
+        solid({P{5, 5}, P{15, 12}, P{5, 19}});
+        line({P{18, 5}, P{18, 19}});
+        break;
+    case IconKind::info:
+        circle(12, 12, 9);
+        line({P{12, 11}, P{12, 16}});
+        dot(12, 8.2f, 1.1f);
+        break;
+    case IconKind::success:
+        circle(12, 12, 9);
+        line({P{8, 12.5f}, P{11, 15.5f}, P{16.5f, 9.5f}});
+        break;
+    case IconKind::warning:
+        closed({P{12, 4}, P{21, 19}, P{3, 19}});
+        line({P{12, 10}, P{12, 14}});
+        dot(12, 17, 0.9f);
+        break;
+    case IconKind::danger:
+        circle(12, 12, 9);
+        line({P{9, 9}, P{15, 15}});
+        line({P{15, 9}, P{9, 15}});
+        break;
+    }
+
+    if (FAILED(sink->Close())) return false;
+    if (has_fill && FAILED(fsink->Close())) return false;
+    icon_geos_.emplace(static_cast<int>(kind), std::move(stroke));
+    if (has_fill) icon_fill_geos_.emplace(static_cast<int>(kind), std::move(fill));
+    return true;
+}
+
+ID2D1PathGeometry* D2DRenderer::icon_geometry(IconKind kind) noexcept {
+    auto it = icon_geos_.find(static_cast<int>(kind));
+    if (it != icon_geos_.end()) return it->second.Get();
+    if (!build_icon(kind)) return nullptr;
+    it = icon_geos_.find(static_cast<int>(kind));
+    return it != icon_geos_.end() ? it->second.Get() : nullptr;
+}
+
+ID2D1PathGeometry* D2DRenderer::icon_fill_geometry(IconKind kind) noexcept {
+    auto it = icon_fill_geos_.find(static_cast<int>(kind));
+    if (it != icon_fill_geos_.end()) return it->second.Get();
+    // Building the stroke geometry also builds the fill accents.
+    if (icon_geometry(kind) == nullptr) return nullptr;
+    it = icon_fill_geos_.find(static_cast<int>(kind));
+    return it != icon_fill_geos_.end() ? it->second.Get() : nullptr;
+}
+
+void D2DRenderer::draw_icon(Rect box, IconKind kind, Color c, float stroke_w,
+                            float alpha) noexcept {
+    if (frame_rt_ == nullptr) return;
+    ID2D1PathGeometry* geo = icon_geometry(kind);
+    if (geo == nullptr) return;
+    ID2D1SolidColorBrush* b = brush(c);
+    ID2D1StrokeStyle* style = icon_stroke();
+    if (b == nullptr || style == nullptr) return;
+
+    const float side = std::min(box.w, box.h);
+    if (side <= 0.0f) return;
+    const float s = side / 24.0f;
+    b->SetOpacity(alpha);
+
+    // The geometry lives on the 24x24 grid; scale+translate it into `box`
+    // via a temporary transform. Stroke width is given in final logical
+    // units, so divide by the scale to keep it constant on screen.
+    D2D1_MATRIX_3X2_F world{};
+    frame_rt_->GetTransform(&world);
+    frame_rt_->SetTransform(world * D2D1::Matrix3x2F::Scale(s, s) *
+                                      D2D1::Matrix3x2F::Translation(box.x, box.y));
+    frame_rt_->DrawGeometry(geo, b, std::max(0.25f, stroke_w / s), style);
+    if (ID2D1PathGeometry* fg = icon_fill_geometry(kind); fg != nullptr) {
+        frame_rt_->FillGeometry(fg, b);
+    }
+    frame_rt_->SetTransform(world);
 }
 
 void D2DRenderer::push_clip(Rect r) noexcept {

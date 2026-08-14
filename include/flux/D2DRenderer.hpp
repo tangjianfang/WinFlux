@@ -43,11 +43,25 @@ public:
     void end() noexcept;
 
     void fill_rect(Rect r, Color c) noexcept;
-    void fill_round_rect(Rect r, float radius, Color c) noexcept;
-    void draw_round_rect(Rect r, float radius, Color c, float stroke_width) noexcept;
-    void draw_line(float x1, float y1, float x2, float y2, Color c, float stroke_width) noexcept;
+    void fill_round_rect(Rect r, float radius, Color c, float alpha = 1.0f) noexcept;
+    void draw_round_rect(Rect r, float radius, Color c, float stroke_width,
+                         float alpha = 1.0f) noexcept;
+    void draw_line(float x1, float y1, float x2, float y2, Color c,
+                   float stroke_width, float alpha = 1.0f) noexcept;
     void draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
-                   bool bold, Align halign) noexcept;
+                   bool bold, Align halign, float alpha = 1.0f) noexcept;
+    // Horizontal L->R gradient fill; SetStartPoint/SetEndPoint are updated
+    // per call so one cached brush serves every rect.
+    void fill_round_rect_gradient(Rect r, float radius, const Gradient& g,
+                                  float alpha = 1.0f) noexcept;
+    // Elevation 1..3 hand-drawn shadow: concentric low-alpha rounded rects
+    // below/around the base rect (no D2D effects dependency).
+    void draw_shadow(Rect r, float radius, int elevation) noexcept;
+    // 24x24 stroke-grid icon scaled into `box` (square side = min(w,h)).
+    // stroke_w is in final logical units; fill accents drawn when the icon
+    // has any (play/pause triangles, notification dots, ...).
+    void draw_icon(Rect box, IconKind kind, Color c, float stroke_w,
+                   float alpha = 1.0f) noexcept;
     [[nodiscard]] std::pair<float, float> measure_text(const std::wstring& text,
                                                        float size_pt, bool bold) noexcept;
     void push_clip(Rect r) noexcept;
@@ -57,6 +71,14 @@ private:
     [[nodiscard]] ID2D1SolidColorBrush* brush(Color c) noexcept;
     [[nodiscard]] IDWriteTextFormat* format(float size_pt, bool bold) noexcept;
     bool ensure_dwrite() noexcept;
+    // Icon geometry (built lazily via the frame RT's factory, keyed by
+    // IconKind). `icon_geometry` returns the stroke outline; `icon_fill_`
+    // the filled accents (nullptr for icons without any).
+    [[nodiscard]] ID2D1PathGeometry* icon_geometry(IconKind kind) noexcept;
+    [[nodiscard]] ID2D1PathGeometry* icon_fill_geometry(IconKind kind) noexcept;
+    bool build_icon(IconKind kind) noexcept;
+    [[nodiscard]] ID2D1LinearGradientBrush* gradient_brush(const Gradient& g) noexcept;
+    [[nodiscard]] ID2D1StrokeStyle* icon_stroke() noexcept;
 
     IPresenter* presenter_ = nullptr;
     ID2D1RenderTarget* frame_rt_ = nullptr;   // transient, valid only during begin/end
@@ -78,6 +100,14 @@ private:
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>> brushes_;
     std::unordered_map<unsigned int, Microsoft::WRL::ComPtr<IDWriteTextFormat>> formats_;
+    // Round cap/join stroke style shared by every icon draw.
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> icon_stroke_;
+    // Icon geometries keyed by IconKind (stroke outline + fill accents).
+    std::unordered_map<int, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> icon_geos_;
+    std::unordered_map<int, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> icon_fill_geos_;
+    // Gradient brushes keyed by (from,to) colour pair.
+    std::unordered_map<unsigned long long,
+                       Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> gradients_;
     // Per-(text,format) IDWriteTextLayout cache, keyed by a 64-bit hash that
     // mixes the format key with the text pointer/size. measure_text reuses
     // the same layout across frames so long as the text and format haven't
