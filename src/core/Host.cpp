@@ -444,7 +444,10 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     }
 
     if (path != hover_path_) {
+        hover_from_path_ = std::move(hover_path_);
         hover_path_ = std::move(path);
+        hover_change_ms_ = GetTickCount64();
+        animate_for(static_cast<unsigned>(tokens::motion_fast_ms));
         // Hover highlight is applied at render time from hover_path_ and is not
         // encoded in the element tree; the damage diff is fed the OLD and NEW
         // paths in paint_frame so this becomes a partial repaint.
@@ -506,8 +509,11 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
     // but matches Win32 tabbing behaviour: clicking outside any focusable
     // element drops focus.
     if (new_focus != focus_path_ || new_pressed != pressed_path_) {
+        press_from_path_ = std::move(pressed_path_);
         focus_path_ = std::move(new_focus);
         pressed_path_ = std::move(new_pressed);
+        press_change_ms_ = GetTickCount64();
+        animate_for(static_cast<unsigned>(tokens::motion_fast_ms));
         if (hwnd_ != nullptr && !pressed_path_.empty()) SetCapture(hwnd_);
         request_render();
     }
@@ -535,6 +541,9 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
     // handler below may trigger a rebuild that invalidates any previously
     // cached pointer. Holding the path keeps the click target stable.
     const Path fired = pressed_path_;
+    press_from_path_ = pressed_path_;
+    press_change_ms_ = GetTickCount64();
+    animate_for(static_cast<unsigned>(tokens::motion_fast_ms));
     pressed_path_.clear();
     request_render();   // drop the pressed highlight via partial diff
 
@@ -779,16 +788,33 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
     if (!rects_intersect(r, clip)) return;
 
     const bool hovered = is_prefix(path, hover_path_) && !path.empty();
+    const bool hover_prev = is_prefix(path, hover_from_path_) && !path.empty();
+    const unsigned long long now_ms = GetTickCount64();
+    const float hover_t = p.enabled
+        ? approach_blend(hovered, hover_prev, now_ms, hover_change_ms_,
+                         static_cast<unsigned>(tokens::motion_fast_ms))
+        : 0.0f;
     const bool pressed = path == pressed_path_;
+    const bool press_prev = path == press_from_path_;
+    const float press_t = p.enabled
+        ? approach_blend(pressed, press_prev, now_ms, press_change_ms_,
+                         static_cast<unsigned>(tokens::motion_fast_ms))
+        : 0.0f;
     const bool focused = path == focus_path_;
     const Palette& pal = shown_;
 
-    // Background with state precedence: disabled > pressed > hover > rest.
+    // Background: disabled snaps; hover/press highlight ramps over
+    // motion_fast_ms (blend of the base with each state colour).
     if (p.background.has_value()) {
         Color bg = *p.background;
-        if (!p.enabled && p.disabled_background.has_value()) bg = *p.disabled_background;
-        else if (pressed && p.pressed_background.has_value()) bg = *p.pressed_background;
-        else if (hovered && p.enabled && p.hover_background.has_value()) bg = *p.hover_background;
+        if (!p.enabled && p.disabled_background.has_value()) {
+            bg = *p.disabled_background;
+        } else {
+            if (hover_t > 0.0f && p.hover_background.has_value())
+                bg = lerp(bg, *p.hover_background, hover_t);
+            if (press_t > 0.0f && p.pressed_background.has_value())
+                bg = lerp(bg, *p.pressed_background, press_t);
+        }
         renderer_.fill_round_rect(r, p.radius, bg);
     }
     if (p.border_color.has_value() && p.border_width > 0.0f) {
