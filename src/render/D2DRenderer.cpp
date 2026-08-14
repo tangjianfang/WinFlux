@@ -10,7 +10,7 @@ namespace flux {
 namespace {
 
 D2D1_COLOR_F to_d2d(Color c) noexcept {
-    return D2D1::ColorF(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, 1.0f);
+    return D2D1::ColorF(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f);
 }
 
 D2D1_RECT_F to_rect(Rect r) noexcept {
@@ -18,7 +18,8 @@ D2D1_RECT_F to_rect(Rect r) noexcept {
 }
 
 unsigned color_key(Color c) noexcept {
-    return (static_cast<unsigned>(c.r) << 16u) | (static_cast<unsigned>(c.g) << 8u) | c.b;
+    return (static_cast<unsigned>(c.r) << 24u) | (static_cast<unsigned>(c.g) << 16u) |
+           (static_cast<unsigned>(c.b) << 8u) | c.a;
 }
 
 unsigned format_key(float size_pt, bool bold) noexcept {
@@ -283,7 +284,7 @@ void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Col
 ID2D1LinearGradientBrush* D2DRenderer::gradient_brush(const Gradient& g) noexcept {
     if (frame_rt_ == nullptr) return nullptr;
     const unsigned long long key =
-        (static_cast<unsigned long long>(color_key(g.from)) << 24u) | color_key(g.to);
+        (static_cast<unsigned long long>(color_key(g.from)) << 32u) | color_key(g.to);
     auto it = gradients_.find(key);
     if (it != gradients_.end()) return it->second.Get();
 

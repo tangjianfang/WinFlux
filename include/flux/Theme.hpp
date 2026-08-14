@@ -13,12 +13,18 @@ struct Color {
     unsigned char r{0};
     unsigned char g{0};
     unsigned char b{0};
+    unsigned char a{255};   // 255 = opaque; brushes compose with this alpha
 
     [[nodiscard]] constexpr bool operator==(const Color&) const noexcept = default;
 };
 
 [[nodiscard]] constexpr Color rgb(unsigned char r, unsigned char g, unsigned char b) noexcept {
     return Color{r, g, b};
+}
+
+[[nodiscard]] constexpr Color rgba(unsigned char r, unsigned char g, unsigned char b,
+                                   unsigned char a) noexcept {
+    return Color{r, g, b, a};
 }
 
 struct Palette {

@@ -41,9 +41,10 @@ Color lerp(Color a, Color b, float t) noexcept {
     if (!(t > 0.0f)) return a;
     if (t >= 1.0f) return b;
     auto mix = [t](unsigned char va, unsigned char vb) noexcept {
-        return uc(clamp_byte(static_cast<int>(va + (static_cast<int>(vb) - static_cast<int>(va)) * t)));
+        return uc(clamp_byte(static_cast<int>(
+            static_cast<float>(va) + (static_cast<float>(vb) - static_cast<float>(va)) * t + 0.5f)));
     };
-    return Color{mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)};
+    return Color{mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), mix(a.a, b.a)};
 }
 
 Palette lerp_palette(const Palette& a, const Palette& b, float t) noexcept {

@@ -45,6 +45,13 @@ void test_theme() {
     const Palette mid = lerp_palette(light, dark, 1.0f);
     expect(mid.background == dark.background, "lerp_palette t=1 equals target palette");
 
+    // Alpha channel (Round 2): default opaque, rgba() packs all four
+    // channels, lerp interpolates alpha too.
+    expect(rgb(1, 2, 3).a == 255, "rgb() defaults to opaque alpha");
+    expect(rgba(10, 20, 30, 128).a == 128, "rgba() packs alpha");
+    expect(lerp(rgba(0, 0, 0, 0), rgba(0, 0, 0, 255), 0.5f).a == 128,
+           "lerp interpolates alpha channel");
+
     expect(tokens::spacing_sm == 8 && tokens::control_height_md == 32,
            "design tokens match the DESIGN.md contract");
 
