@@ -128,6 +128,10 @@ using ElementPtr = std::shared_ptr<Element>;
                                   std::function<void(bool)> on_change, Props p = {});
 [[nodiscard]] ElementPtr progress(float value, Props p = {});
 [[nodiscard]] ElementPtr icon(IconKind kind, Props p = {});
+// Vertical scroll viewport. `content` is laid out at natural height inside
+// the (Props/parent-sized) viewport and clipped; the Host owns the scroll
+// offset keyed by the element's path. Single-child contract.
+[[nodiscard]] ElementPtr scroll_view(ElementPtr content, Props p = {});
 
 // Interactive primitives beyond button/checkbox. Each owns its own element
 // type so the paint branch can pick the right glyph; builders take the

@@ -70,6 +70,13 @@ ElementPtr icon(IconKind kind, Props p) {
     return make(L"icon", std::move(p));
 }
 
+ElementPtr scroll_view(ElementPtr content, Props p) {
+    p.focusable = true;
+    auto e = make(L"scroll_view", std::move(p));
+    if (content != nullptr) e->children.push_back(std::move(content));
+    return e;
+}
+
 ElementPtr text_input(std::wstring value, std::function<void(std::wstring)> on_change, Props p) {
     // The text input owns its visual chrome. The change handler is stored in
     // on_text_change; the host's wndproc dispatches WM_CHAR/VK_BACK to the
@@ -332,6 +339,25 @@ void Host::animate_for(unsigned ms) noexcept {
     const unsigned long long deadline = GetTickCount64() + ms + 1;
     if (deadline > anim_deadline_ms_) anim_deadline_ms_ = deadline;
     if (hwnd_ != nullptr) SetTimer(hwnd_, anim_timer_id_, anim_tick_ms_, nullptr);
+}
+
+void Host::layout_scroll_views(Element& e, const Path& prefix, const LayoutContext& ctx,
+                               std::map<Path, ScrollState>& next) noexcept {
+    if (e.type == L"scroll_view") {
+        ScrollState st;
+        if (const auto it = scrolls_.find(prefix); it != scrolls_.end()) st = it->second;
+        st.content_h = layout_scroll_view(e, st.offset_y, ctx);
+        st.viewport_h = std::max(0.0f, e.h - e.props.padding.top - e.props.padding.bottom);
+        next.emplace(prefix, st);
+        // The content subtree was baked by layout_scroll_view; no further
+        // scroll_views can live inside this frame's content without another
+        // walk — recurse anyway so nested scroll views also get laid out.
+    }
+    for (size_t i = 0; i < e.children.size(); ++i) {
+        Path child = prefix;
+        child.push_back(static_cast<int>(i));
+        layout_scroll_views(*e.children[i], child, ctx, next);
+    }
 }
 
 void Host::handle_timer() noexcept {
@@ -724,6 +750,11 @@ void Host::paint_frame() noexcept {
             return {w, h};
         };
         flex_layout(*tree_, logical_w, logical_h, ctx);
+        // Lay out scroll_view contents (unbounded height + offset baking)
+        // and carry scroll offsets over by path identity.
+        std::map<Path, ScrollState> next_scrolls;
+        layout_scroll_views(*tree_, Path{}, ctx, next_scrolls);
+        scrolls_ = std::move(next_scrolls);
     }
 
 #ifdef _DEBUG
@@ -1014,11 +1045,58 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
     }
 
     // Children paint over the container background (painter's algorithm).
+    // scroll_view content is additionally clipped to the viewport and the
+    // floating scrollbar is drawn on top afterwards.
+    const bool is_scroll = e.type == L"scroll_view";
+    if (is_scroll) {
+        renderer_.push_clip(Rect{r.x + p.padding.left, r.y + p.padding.top,
+                                 r.w - p.padding.left - p.padding.right,
+                                 r.h - p.padding.top - p.padding.bottom});
+    }
     for (size_t i = 0; i < e.children.size(); ++i) {
         Path child_path = path;
         child_path.push_back(static_cast<int>(i));
         render_element(*e.children[i], child_path, clip);
     }
+    if (is_scroll) {
+        renderer_.pop_clip();
+        draw_scrollbar(e, path, now_ms);
+    }
+}
+
+void Host::draw_scrollbar(const Element& e, const Path& path, unsigned long long now_ms) noexcept {
+    const auto it = scrolls_.find(path);
+    if (it == scrolls_.end()) return;
+    const ScrollState& st = it->second;
+    if (st.content_h <= st.viewport_h || st.viewport_h <= 0.0f) return;
+
+    // Auto-hide: solid for a 600 ms hold after the last scroll, then fade
+    // over motion_medium_ms (the clock armed at scroll time keeps frames
+    // coming through the fade).
+    constexpr unsigned long long kHoldMs = 600;
+    const float fade_t = static_cast<float>(now_ms - st.last_scroll_ms - kHoldMs) /
+                         static_cast<float>(tokens::motion_medium_ms);
+    const float bar_alpha = fade_t >= 1.0f ? 0.0f : (fade_t <= 0.0f ? 1.0f : 1.0f - fade_t);
+    if (bar_alpha <= 0.0f) return;
+
+    const Props& p = e.props;
+    const float vw = e.w - p.padding.left - p.padding.right;
+    const float track_x = e.x + p.padding.left + vw - static_cast<float>(tokens::scrollbar_width);
+    const float track_y = e.y + p.padding.top;
+    const float vh = st.viewport_h;
+    const float max_off = st.content_h - vh;
+    const float thumb_h = std::max(24.0f, vh * (vh / st.content_h));
+    const float thumb_y = track_y + (vh - thumb_h) * (max_off > 0.0f ? st.offset_y / max_off : 0.0f);
+
+    const Palette& pal = shown_;
+    const float track_w = 3.0f;
+    renderer_.fill_round_rect(Rect{track_x + static_cast<float>(tokens::scrollbar_width) - track_w,
+                                   track_y, track_w, vh},
+                              track_w * 0.5f, pal.divider, 0.35f * bar_alpha);
+    renderer_.fill_round_rect(Rect{track_x, thumb_y,
+                                   static_cast<float>(tokens::scrollbar_width), thumb_h},
+                              static_cast<float>(tokens::scrollbar_width) * 0.5f,
+                              pal.text_secondary, 0.55f * bar_alpha);
 }
 
 } // namespace flux

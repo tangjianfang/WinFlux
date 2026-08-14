@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "HwndPresenter.hpp"
 #include "Animation.hpp"
 #include "Element.hpp"
+#include "FlexLayout.hpp"
 #include "Presenter.hpp"
 #include "Theme.hpp"
 
@@ -98,6 +100,22 @@ public:
 
 private:
     using Path = std::vector<int>;
+
+    // Scroll offsets and measured extents, keyed by the scroll_view's
+    // positional path (same identity model as hover/pressed paths: stable
+    // while the tree shape is stable). Rebuilt every frame by
+    // layout_scroll_views; offsets carry over frame to frame by path match.
+    struct ScrollState {
+        float offset_y = 0.0f;
+        float content_h = 0.0f;
+        float viewport_h = 0.0f;
+        unsigned long long last_scroll_ms = 0;
+    };
+    std::map<Path, ScrollState> scrolls_;
+
+    void layout_scroll_views(Element& e, const Path& prefix, const LayoutContext& ctx,
+                             std::map<Path, ScrollState>& next) noexcept;
+    void draw_scrollbar(const Element& e, const Path& path, unsigned long long now_ms) noexcept;
 
     friend LRESULT CALLBACK host_wndproc(HWND, UINT, WPARAM, LPARAM) noexcept;
 

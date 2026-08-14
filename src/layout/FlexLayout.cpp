@@ -26,7 +26,13 @@ std::pair<float, float> measure_impl(const Element& e, const LayoutContext& ctx,
 
     const EdgeInsets& pad = e.props.padding;
     std::pair<float, float> result;
-    if (is_leaf(e)) {
+    if (e.type == L"scroll_view") {
+        // The viewport is sized by Props / parent flex allocation only —
+        // the content never leaks into the parent's measurement (the Host
+        // lays the content out separately with an unbounded canvas).
+        result = {pad.left + pad.right + e.props.width.value_or(0.0f),
+                  pad.top + pad.bottom + e.props.height.value_or(0.0f)};
+    } else if (is_leaf(e)) {
         auto [tw, th] = ctx.measure_leaf ? ctx.measure_leaf(e) : std::pair<float, float>{0.0f, 0.0f};
         result = {tw + pad.left + pad.right, th + pad.top + pad.bottom};
     } else {
@@ -79,6 +85,10 @@ void layout_node(Element& e, float ox, float oy, float w, float h,
     e.y = oy;
     e.w = w;
     e.h = h;
+    // scroll_view children are NOT laid out here — the content box gets an
+    // unbounded layout pass in layout_scroll_view (Host-driven, after the
+    // viewport position is known and the scroll offset can be applied).
+    if (e.type == L"scroll_view") return;
     if (e.children.empty()) return;
 
     const Props& p = e.props;
@@ -175,6 +185,47 @@ void layout_node(Element& e, float ox, float oy, float w, float h,
 void flex_layout(Element& root, float width, float height, const LayoutContext& ctx) noexcept {
     MeasureCache cache;
     layout_node(root, 0.0f, 0.0f, width, height, ctx, cache);
+}
+
+float layout_scroll_view(Element& sv, float& offset_y, const LayoutContext& ctx) noexcept {
+    if (sv.children.empty()) {
+        offset_y = 0.0f;
+        return 0.0f;
+    }
+    constexpr float kUnbounded = 1.0e6f;
+    const Props& p = sv.props;
+    const float viewport_w = std::max(0.0f, sv.w - p.padding.left - p.padding.right);
+    const float viewport_h = std::max(0.0f, sv.h - p.padding.top - p.padding.bottom);
+
+    // Unbounded vertical canvas so the content keeps its natural height
+    // (nothing shrinks, nothing grows).
+    Element& content = *sv.children[0];
+    MeasureCache cache;
+    layout_node(content, 0.0f, 0.0f, viewport_w, kUnbounded, ctx, cache);
+
+    float content_h = content.props.height.value_or(0.0f) + content.props.padding.top +
+                      content.props.padding.bottom;
+    if (!content.children.empty()) {
+        const Element& last = *content.children.back();
+        content_h = std::max(content_h, last.y + last.h + content.props.padding.bottom);
+    }
+
+    offset_y = std::clamp(offset_y, 0.0f, std::max(0.0f, content_h - viewport_h));
+
+    // Bake the content-box origin (viewport top minus the scroll offset)
+    // into the content's absolute coordinates so the generic diff / clip /
+    // hit-test pipeline works with zero special cases.
+    const float dx = sv.x + p.padding.left;
+    const float dy = sv.y + p.padding.top - offset_y;
+    std::vector<Element*> stack{&content};
+    while (!stack.empty()) {
+        Element* n = stack.back();
+        stack.pop_back();
+        n->x += dx;
+        n->y += dy;
+        for (auto& c : n->children) stack.push_back(c.get());
+    }
+    return content_h;
 }
 
 } // namespace flux

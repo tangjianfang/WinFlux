@@ -19,4 +19,11 @@ struct LayoutContext {
 
 void flex_layout(Element& root, float width, float height, const LayoutContext& ctx) noexcept;
 
+// Lays out a laid-out (x/y/w/h already set) scroll_view's single child at
+// its natural height inside the viewport, clamps `offset_y` to the
+// scrollable range, and bakes the content-box origin minus the offset into
+// the content subtree's absolute coordinates. Returns the content height.
+// The caller (Host) owns the per-path scroll offset across frames.
+float layout_scroll_view(Element& sv, float& offset_y, const LayoutContext& ctx) noexcept;
+
 } // namespace flux

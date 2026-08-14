@@ -132,6 +132,65 @@ void test_justify() {
     }
 }
 
+void test_scroll_layout() {
+    LayoutContext zero;
+    zero.measure_leaf = [](const Element&) { return std::pair<float, float>{0.0f, 20.0f}; };
+
+    // 30 rows x 20 px of content inside a 300x200 scroll_view.
+    auto mk = [] {
+        auto content = view();
+        for (int i = 0; i < 30; ++i) content->children.push_back(view());
+        Props sp; sp.width = 300.0f; sp.height = 200.0f;
+        return scroll_view(std::move(content), std::move(sp));
+    };
+
+    // a) Without explicit size the scroll_view measures to 0 — the content
+    // never leaks into the parent's measurement.
+    {
+        auto content = view();
+        for (int i = 0; i < 30; ++i) content->children.push_back(view());
+        Props sp;
+        auto sv = scroll_view(std::move(content), std::move(sp));
+        Props rp; rp.direction = Direction::column;
+        auto root = with_children(view(std::move(rp)), {std::move(sv)});
+        flex_layout(*root, 400.0f, 500.0f, zero);
+        expect(near_eq(root->children[0]->h, 0.0f),
+               "scroll_view without explicit size collapses (no content leak)");
+    }
+
+    // b/c/d) Content layout + offset clamping + coordinate baking.
+    {
+        Props rp; rp.direction = Direction::column;
+        auto root = with_children(view(std::move(rp)), {mk()});
+        flex_layout(*root, 400.0f, 500.0f, zero);
+        Element& sv = *root->children[0];
+        expect(sv.type == L"scroll_view", "scroll_view builder sets type");
+        expect(near_eq(sv.w, 300.0f) && near_eq(sv.h, 200.0f),
+               "scroll_view sizes from Props");
+
+        float offset = 0.0f;
+        const float ch = layout_scroll_view(sv, offset, zero);
+        expect(near_eq(ch, 600.0f), "content_h == 30 rows x 20");
+        expect(near_eq(sv.children[0]->children[0]->y, sv.y),
+               "offset 0: first row bakes at content-box top");
+
+        offset = 1000.0f;
+        (void)layout_scroll_view(sv, offset, zero);
+        expect(near_eq(offset, 400.0f), "offset clamps to content-viewport");
+        expect(near_eq(sv.children[0]->children[0]->y, sv.y - 400.0f),
+               "offset bakes into content coords");
+    }
+
+    // Empty scroll_view: no content, content_h 0, offset pinned to 0.
+    {
+        auto sv = scroll_view(nullptr, Props{});
+        sv->x = 10.0f; sv->y = 10.0f; sv->w = 100.0f; sv->h = 100.0f;
+        float offset = 50.0f;
+        const float ch = layout_scroll_view(*sv, offset, zero);
+        expect(ch == 0.0f && offset == 0.0f, "empty scroll_view pins offset to 0");
+    }
+}
+
 void test_animation() {
     // Curves: endpoints exact, clamped, front/back-loaded as designed.
     expect(near_eq(apply_curve(0.0f, Curve::linear), 0.0f) &&
@@ -456,6 +515,7 @@ int main() {
     test_theme();
     test_animation();
     test_justify();
+    test_scroll_layout();
     test_builders();
     test_layout_row_grow();
     test_layout_column_center();
