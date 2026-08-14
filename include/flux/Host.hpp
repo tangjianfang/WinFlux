@@ -126,6 +126,11 @@ private:
     void handle_lbutton_up(int px, int py) noexcept;
     void handle_key_down(WPARAM vk) noexcept;
     void handle_char(WPARAM ch) noexcept;
+    void handle_mouse_wheel(int delta, int px, int py) noexcept;
+    // Applies a scroll delta (or absolute target) to the scroll_view at
+    // `sv_path`, clamping to range, arming the auto-hide clock, repainting.
+    void scroll_by(const Path& sv_path, float delta) noexcept;
+    void scroll_to(const Path& sv_path, float offset) noexcept;
     void handle_size(unsigned width_px, unsigned height_px) noexcept;
     void handle_dpi_changed(unsigned dpi, const RECT& suggested) noexcept;
     void handle_timer() noexcept;
@@ -187,6 +192,10 @@ private:
     Path hover_path_;
     Path pressed_path_;
     Path focus_path_;
+    // Scrollbar thumb drag: the scroll_view being dragged plus the grab
+    // offset inside the thumb (logical px).
+    Path drag_scroll_;
+    float drag_grab_dy_ = 0.0f;
     // Hover/press micro-transition state: the set as it was when it last
     // changed, plus the change timestamp. render_element blends the
     // highlight over motion_fast_ms while the animation clock keeps

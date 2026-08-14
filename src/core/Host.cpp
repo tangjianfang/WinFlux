@@ -227,6 +227,10 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             case WM_CHAR:
                 host->handle_char(wparam);
                 return 0;
+            case WM_MOUSEWHEEL:
+                host->handle_mouse_wheel(static_cast<int>(GET_WHEEL_DELTA_WPARAM(wparam)),
+                                         GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+                return 0;
             case WM_TIMER:
                 if (wparam == Host::anim_timer_id_) host->handle_timer();
                 return 0;
@@ -342,8 +346,7 @@ void Host::animate_for(unsigned ms) noexcept {
 }
 
 void Host::layout_scroll_views(Element& e, const Path& prefix, const LayoutContext& ctx,
-                               std::map<Path, ScrollState>& next) noexcept {
-    if (e.type == L"scroll_view") {
+                               std::map<Path, ScrollState>& next) noexcept {    if (e.type == L"scroll_view") {
         ScrollState st;
         if (const auto it = scrolls_.find(prefix); it != scrolls_.end()) st = it->second;
         st.content_h = layout_scroll_view(e, st.offset_y, ctx);
@@ -357,6 +360,46 @@ void Host::layout_scroll_views(Element& e, const Path& prefix, const LayoutConte
         Path child = prefix;
         child.push_back(static_cast<int>(i));
         layout_scroll_views(*e.children[i], child, ctx, next);
+    }
+}
+
+void Host::scroll_by(const Path& sv_path, float delta) noexcept {
+    auto it = scrolls_.find(sv_path);
+    if (it == scrolls_.end()) return;
+    const float max_off = std::max(0.0f, it->second.content_h - it->second.viewport_h);
+    scroll_to(sv_path, std::clamp(it->second.offset_y + delta, 0.0f, max_off));
+}
+
+void Host::scroll_to(const Path& sv_path, float offset) noexcept {
+    auto it = scrolls_.find(sv_path);
+    if (it == scrolls_.end()) return;
+    const float max_off = std::max(0.0f, it->second.content_h - it->second.viewport_h);
+    const float next = std::clamp(offset, 0.0f, max_off);
+    if (next == it->second.offset_y) return;
+    it->second.offset_y = next;
+    it->second.last_scroll_ms = GetTickCount64();
+    // Hold 600 ms + fade over motion_medium: arm the clock past both so the
+    // auto-hide actually completes (see draw_scrollbar).
+    animate_for(600u + static_cast<unsigned>(tokens::motion_medium_ms) + 32u);
+    request_render();
+}
+
+void Host::handle_mouse_wheel(int delta, int px, int py) noexcept {
+    const float lx = to_logical_px(px);
+    const float ly = to_logical_px(py);
+    Path path;
+    (void)hit_test(lx, ly, path);
+    // Nearest scrollable ancestor of the point wins.
+    for (Path walk = path; !walk.empty(); walk.pop_back()) {
+        const auto it = scrolls_.find(walk);
+        if (it == scrolls_.end()) continue;
+        if (it->second.content_h > it->second.viewport_h) {
+            // One notch (±120) scrolls three control rows.
+            const float step = static_cast<float>(delta) / 120.0f *
+                               3.0f * static_cast<float>(tokens::control_height_md);
+            scroll_by(walk, -step);
+            return;
+        }
     }
 }
 
@@ -503,6 +546,25 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     const float ly = to_logical_px(py);
     last_mouse_lx_ = lx;
     last_mouse_ly_ = ly;
+
+    // Scrollbar thumb drag: map the pointer to the scroll offset directly.
+    if (!drag_scroll_.empty()) {
+        const Element* sv = resolve(drag_scroll_);
+        const auto it = scrolls_.find(drag_scroll_);
+        if (sv != nullptr && it != scrolls_.end()) {
+            const ScrollState& st = it->second;
+            const float max_off = std::max(0.0f, st.content_h - st.viewport_h);
+            const float thumb_h = std::max(24.0f, st.viewport_h * (st.viewport_h / st.content_h));
+            const float track_y = sv->y + sv->props.padding.top;
+            const float span = st.viewport_h - thumb_h;
+            if (span > 0.0f && max_off > 0.0f) {
+                const float ratio = (ly - drag_grab_dy_ - track_y) / span;
+                scroll_to(drag_scroll_, std::clamp(ratio, 0.0f, 1.0f) * max_off);
+            }
+        }
+        return;
+    }
+
     Path path;
     (void)hit_test(lx, ly, path);
 
@@ -544,6 +606,38 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
     const float ly = to_logical_px(py);
     Path path;
     const Element* target = hit_test(lx, ly, path);
+
+    // Scrollbar thumb/track interaction takes precedence over content hits.
+    if (target != nullptr) {
+        for (Path walk = path; !walk.empty(); walk.pop_back()) {
+            const Element* sv = resolve(walk);
+            if (sv == nullptr || sv->type != L"scroll_view") continue;
+            const auto it = scrolls_.find(walk);
+            if (it == scrolls_.end() || it->second.content_h <= it->second.viewport_h) break;
+            const ScrollState& st = it->second;
+            const Props& pp = sv->props;
+            const float vw = sv->w - pp.padding.left - pp.padding.right;
+            const float track_x = sv->x + pp.padding.left + vw -
+                                  static_cast<float>(tokens::scrollbar_width) - 2.0f;
+            const float track_y = sv->y + pp.padding.top;
+            if (lx >= track_x && ly >= track_y && ly <= track_y + st.viewport_h) {
+                const float max_off = st.content_h - st.viewport_h;
+                const float thumb_h = std::max(24.0f, st.viewport_h * (st.viewport_h / st.content_h));
+                const float thumb_y = track_y + (st.viewport_h - thumb_h) * (st.offset_y / max_off);
+                if (ly >= thumb_y && ly <= thumb_y + thumb_h) {
+                    drag_scroll_ = walk;
+                    drag_grab_dy_ = ly - thumb_y;
+                    if (hwnd_ != nullptr) SetCapture(hwnd_);
+                } else {
+                    // Track click: page toward the click position.
+                    scroll_by(walk, ly < thumb_y ? -st.viewport_h * 0.9f : st.viewport_h * 0.9f);
+                }
+                return;
+            }
+            break;   // outermost scroll_view owns the bar
+        }
+    }
+
     Path new_focus;
     Path new_pressed;
     if (target != nullptr) {
@@ -597,6 +691,10 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
 
 void Host::handle_lbutton_up(int px, int py) noexcept {
     if (hwnd_ != nullptr) ReleaseCapture();
+    if (!drag_scroll_.empty()) {
+        drag_scroll_.clear();
+        return;
+    }
     if (pressed_path_.empty()) return;
 
     Path under;
@@ -645,6 +743,27 @@ void Host::handle_key_down(WPARAM vk) noexcept {
             e->props.on_text_change(std::move(text));
         }
         return;
+    }
+
+    // Focused scroll_view: arrow / page / home / end scrolling.
+    if (!focus_path_.empty()) {
+        if (const Element* fe = resolve(focus_path_);
+            fe != nullptr && fe->type == L"scroll_view") {
+            const auto it = scrolls_.find(focus_path_);
+            if (it != scrolls_.end() && it->second.content_h > it->second.viewport_h) {
+                const float row = static_cast<float>(tokens::control_height_md);
+                const float page = it->second.viewport_h * 0.9f;
+                switch (vk) {
+                case VK_UP:    scroll_by(focus_path_, -row);  return;
+                case VK_DOWN:  scroll_by(focus_path_, row);   return;
+                case VK_PRIOR: scroll_by(focus_path_, -page); return;
+                case VK_NEXT:  scroll_by(focus_path_, page);  return;
+                case VK_HOME:  scroll_to(focus_path_, 0.0f);  return;
+                case VK_END:   scroll_to(focus_path_, 1.0e9f); return;
+                default: break;
+                }
+            }
+        }
     }
 
     std::vector<Path> order;
