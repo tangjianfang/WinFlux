@@ -58,6 +58,7 @@ re-run the smoke test.
 | `motion_slow_ms`   | `280`         | Overlay enter / exit (ms).                   |
 | `checkbox_box`     | `18`          | Checkbox glyph box (logical px).              |
 | `progress_height`  | `10`          | Progress bar track height (logical px).       |
+| `scrollbar_width`  | `8`           | Floating scrollbar width (logical px).        |
 
 ### Elevation (hand-drawn shadow falloff)
 

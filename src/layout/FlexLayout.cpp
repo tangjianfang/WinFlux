@@ -107,17 +107,29 @@ void layout_node(Element& e, float ox, float oy, float w, float h,
 
     // Pass 2: distribute free space (grow) or shrink proportionally.
     const float free_space = avail_main - total;
+    bool grew = false;
     if (free_space > 0.0f && grow_sum > 0.0f) {
         for (size_t i = 0; i < n; ++i) {
             mains[i] += free_space * (e.children[i]->props.flex_grow / grow_sum);
         }
+        grew = true;
     } else if (free_space < 0.0f && total > 0.0f) {
         const float scale = std::max(0.0f, avail_main / total);
         for (size_t i = 0; i < n; ++i) mains[i] *= scale;
     }
 
-    // Pass 3: position children along main axis; resolve cross axis.
+    // Pass 3: position children along main axis; resolve cross axis. When
+    // nothing grew, justify packs the pack along the main axis
+    // (start/center/end); flex_grow absorbs all free space and wins.
     float cursor = 0.0f;
+    if (!grew && free_space > 0.0f) {
+        switch (p.justify) {
+        case Justify::center: cursor = free_space * 0.5f; break;
+        case Justify::end:    cursor = free_space;        break;
+        case Justify::start:
+        default:              break;
+        }
+    }
     for (size_t i = 0; i < n; ++i) {
         Element& c = *e.children[i];
         const EdgeInsets& m = c.props.margin;

@@ -20,6 +20,9 @@ namespace flux {
 
 enum class Direction { row, column };
 enum class Align { start, center, end, stretch };
+// Main-axis packing when children don't fill the available space and none
+// of them flex_grow (start keeps the existing top/left flow).
+enum class Justify { start, center, end };
 
 // Per-element mouse cursor (WM_SETCURSOR resolves the hovered element's
 // effective cursor walking up from the hit target; arrow is the default).
@@ -60,6 +63,7 @@ struct Props {
     float flex_grow = 0.0f;
     Direction direction = Direction::column;
     Align align = Align::start;   // cross-axis alignment of children
+    Justify justify = Justify::start;   // main-axis packing of a non-growing pack
     float gap = 0.0f;
     EdgeInsets padding{};
     EdgeInsets margin{};

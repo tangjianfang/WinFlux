@@ -91,6 +91,7 @@ inline constexpr float shadow_offset_y = 2.0f;  // downward shift, elevation 1
 
 inline constexpr int checkbox_box = 18;
 inline constexpr int progress_height = 10;
+inline constexpr int scrollbar_width = 8;   // floating overlay bar, logical px
 } // namespace tokens
 
 } // namespace flux

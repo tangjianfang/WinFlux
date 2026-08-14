@@ -78,6 +78,7 @@ void test_theme() {
     expect(tokens::theme_fade_ms == 200, "theme_fade_ms == 200");
     expect(tokens::checkbox_box == 18, "checkbox_box == 18");
     expect(tokens::progress_height == 10, "progress_height == 10");
+    expect(tokens::scrollbar_width == 8, "scrollbar_width == 8");
 
     // Motion tokens (Round 1 visual foundation).
     expect(tokens::motion_fast_ms == 120, "motion_fast_ms == 120");
@@ -88,6 +89,47 @@ void test_theme() {
     expect(tokens::shadow_blur_lg == 14, "shadow_blur_lg == 14");
     expect(near_eq(tokens::shadow_alpha, 0.10f), "shadow_alpha == 0.10");
     expect(near_eq(tokens::shadow_offset_y, 2.0f), "shadow_offset_y == 2.0");
+}
+
+void test_justify() {
+    LayoutContext zero;
+    zero.measure_leaf = [](const Element&) { return std::pair<float, float>{50.0f, 20.0f}; };
+
+    // Row, justify=center: two 50-wide children in a 200-wide container
+    // leave 100 free -> children sit at x=50 and x=100.
+    {
+        Props rp; rp.direction = Direction::row; rp.justify = Justify::center;
+        auto t = with_children(view(std::move(rp)), {view(), view()});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        expect(near_eq(t->children[0]->x, 50.0f) && near_eq(t->children[1]->x, 100.0f),
+               "row justify=center centers the pack");
+    }
+    // Row, justify=end: pack flush against the main-axis end.
+    {
+        Props rp; rp.direction = Direction::row; rp.justify = Justify::end;
+        auto t = with_children(view(std::move(rp)), {view(), view()});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        expect(near_eq(t->children[0]->x, 100.0f) &&
+               near_eq(t->children[1]->x + t->children[1]->w, 200.0f),
+               "row justify=end flush right");
+    }
+    // Column, justify=center: vertical centering (the modal use-case).
+    {
+        Props rp; rp.direction = Direction::column; rp.justify = Justify::center;
+        auto t = with_children(view(std::move(rp)), {view()});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        expect(near_eq(t->children[0]->y, 40.0f),
+               "column justify=center centers vertically");
+    }
+    // flex_grow still absorbs all free space; justify becomes a no-op.
+    {
+        Props rp; rp.direction = Direction::row; rp.justify = Justify::end;
+        Props a; a.flex_grow = 1.0f;
+        auto t = with_children(view(std::move(rp)), {view(std::move(a)), view()});
+        flex_layout(*t, 200.0f, 100.0f, zero);
+        expect(near_eq(t->children[0]->w, 150.0f) && near_eq(t->children[0]->x, 0.0f),
+               "flex_grow wins over justify");
+    }
 }
 
 void test_animation() {
@@ -413,6 +455,7 @@ void test_damage() {
 int main() {
     test_theme();
     test_animation();
+    test_justify();
     test_builders();
     test_layout_row_grow();
     test_layout_column_center();
