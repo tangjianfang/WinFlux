@@ -71,6 +71,16 @@ void test_theme() {
     expect(tokens::theme_fade_ms == 200, "theme_fade_ms == 200");
     expect(tokens::checkbox_box == 18, "checkbox_box == 18");
     expect(tokens::progress_height == 10, "progress_height == 10");
+
+    // Motion tokens (Round 1 visual foundation).
+    expect(tokens::motion_fast_ms == 120, "motion_fast_ms == 120");
+    expect(tokens::motion_medium_ms == 200, "motion_medium_ms == 200");
+    expect(tokens::motion_slow_ms == 280, "motion_slow_ms == 280");
+    expect(tokens::shadow_blur_sm == 4, "shadow_blur_sm == 4");
+    expect(tokens::shadow_blur_md == 8, "shadow_blur_md == 8");
+    expect(tokens::shadow_blur_lg == 14, "shadow_blur_lg == 14");
+    expect(near_eq(tokens::shadow_alpha, 0.10f), "shadow_alpha == 0.10");
+    expect(near_eq(tokens::shadow_offset_y, 2.0f), "shadow_offset_y == 2.0");
 }
 
 void test_builders() {

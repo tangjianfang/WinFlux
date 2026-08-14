@@ -71,6 +71,18 @@ inline constexpr float font_title = 20.0f;
 inline constexpr float font_hero = 28.0f;
 
 inline constexpr int theme_fade_ms = 200;
+inline constexpr int motion_fast_ms = 120;    // hover / press micro-transitions
+inline constexpr int motion_medium_ms = 200;  // expand / collapse, slides
+inline constexpr int motion_slow_ms = 280;    // overlay enter / exit
+
+// Hand-drawn shadow falloff (elevation 1..3 -> sm/md/lg blur). No D2D
+// effects dependency: the renderer stacks concentric rounded rects.
+inline constexpr int shadow_blur_sm = 4;
+inline constexpr int shadow_blur_md = 8;
+inline constexpr int shadow_blur_lg = 14;
+inline constexpr float shadow_alpha = 0.10f;    // per-layer alpha, elevation 1
+inline constexpr float shadow_offset_y = 2.0f;  // downward shift, elevation 1
+
 inline constexpr int checkbox_box = 18;
 inline constexpr int progress_height = 10;
 } // namespace tokens

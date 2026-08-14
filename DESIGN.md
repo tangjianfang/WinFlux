@@ -53,8 +53,24 @@ re-run the smoke test.
 | Token              | Value         | Meaning                                       |
 |--------------------|---------------|-----------------------------------------------|
 | `theme_fade_ms`    | `200`         | Theme-mode cross-fade duration (ms).          |
+| `motion_fast_ms`   | `120`         | Hover / press micro-transition (ms).         |
+| `motion_medium_ms` | `200`         | Expand / collapse, slide (ms).               |
+| `motion_slow_ms`   | `280`         | Overlay enter / exit (ms).                   |
 | `checkbox_box`     | `18`          | Checkbox glyph box (logical px).              |
 | `progress_height`  | `10`          | Progress bar track height (logical px).       |
+
+### Elevation (hand-drawn shadow falloff)
+
+Shadow elevation 1–3 stacks concentric rounded rects (no D2D effects
+dependency); elevation maps to the blur token below.
+
+| Token             | Value  | Usage                    |
+|-------------------|--------|--------------------------|
+| `shadow_blur_sm`  | `4`    | Cards — elevation 1      |
+| `shadow_blur_md`  | `8`    | Popovers — elevation 2   |
+| `shadow_blur_lg`  | `14`   | Modals — elevation 3     |
+| `shadow_alpha`    | `0.10` | Per-layer alpha at elev 1|
+| `shadow_offset_y` | `2.0`  | Downward shift at elev 1 |
 
 ## Palettes
 
