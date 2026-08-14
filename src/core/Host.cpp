@@ -41,6 +41,7 @@ ElementPtr button(std::wstring text, ClickHandler on_click, Props p) {
     }
     if (p.radius == 0.0f) p.radius = static_cast<float>(tokens::radius_control);
     if (!p.text_color.has_value()) p.text_color = Color{255, 255, 255};
+    p.cursor = Cursor::hand;
     return make(L"button", std::move(p));
 }
 
@@ -85,6 +86,7 @@ ElementPtr text_input(std::wstring value, std::function<void(std::wstring)> on_c
     if (p.border_width == 0.0f) p.border_width = 1.0f;
     if (!p.text_color.has_value()) p.text_color = std::optional<Color>{};
     if (p.text_align == Align::center) p.text_align = Align::start;
+    p.cursor = Cursor::ibeam;
     p.on_text_change = std::move(on_change);
     return make(L"text_input", std::move(p));
 }
@@ -104,6 +106,7 @@ ElementPtr slider(float value, float vmin, float vmax,
     // Click + drag both route through on_value_change: handle_lbutton_down
     // and the mouse_move-while-pressed branch both compute the normalised x
     // and invoke this handler with the domain value.
+    p.cursor = Cursor::size_we;
     p.on_value_change = std::move(on_change);
     return make(L"slider", std::move(p));
 }
@@ -220,6 +223,14 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             case WM_TIMER:
                 if (wparam == Host::anim_timer_id_) host->handle_timer();
                 return 0;
+            case WM_SETCURSOR:
+                // Per-element cursor while over the client area; everything
+                // else (borders, title bar) keeps the default handling.
+                if (LOWORD(lparam) == HTCLIENT) {
+                    host->update_cursor();
+                    return TRUE;
+                }
+                break;
             case WM_NCDESTROY:
                 host->hwnd_ = nullptr;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -385,6 +396,36 @@ bool Host::rects_intersect(const Rect& a, const Rect& b) noexcept {
            a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
+void Host::update_cursor() noexcept {
+    if (tree_ == nullptr) return;
+    Path path;
+    (void)hit_test(last_mouse_lx_, last_mouse_ly_, path);
+    Cursor want = Cursor::arrow;
+    // Nearest annotated ancestor wins (a label inside a button shows the
+    // button's cursor).
+    for (Path walk = path; !walk.empty(); walk.pop_back()) {
+        if (const Element* e = resolve(walk);
+            e != nullptr && e->props.cursor != Cursor::arrow) {
+            want = e->props.cursor;
+            break;
+        }
+    }
+    // While dragging a slider the horizontal resize cursor overrides.
+    if (!pressed_path_.empty()) {
+        if (const Element* e = resolve(pressed_path_);
+            e != nullptr && e->type == L"slider") {
+            want = Cursor::size_we;
+        }
+    }
+    const PCWSTR id = want == Cursor::hand     ? IDC_HAND
+                    : want == Cursor::ibeam    ? IDC_IBEAM
+                    : want == Cursor::size_ns  ? IDC_SIZENS
+                    : want == Cursor::size_we  ? IDC_SIZEWE
+                    : want == Cursor::cross    ? IDC_CROSS
+                                               : IDC_ARROW;
+    SetCursor(LoadCursorW(nullptr, id));
+}
+
 const Element* Host::hit_test(float lx, float ly, Path& path) const noexcept {
     if (tree_ == nullptr || !contains(*tree_, lx, ly)) return nullptr;
 
@@ -434,6 +475,8 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     }
     const float lx = to_logical_px(px);
     const float ly = to_logical_px(py);
+    last_mouse_lx_ = lx;
+    last_mouse_ly_ = ly;
     Path path;
     (void)hit_test(lx, ly, path);
 
