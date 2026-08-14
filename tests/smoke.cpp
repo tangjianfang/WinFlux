@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include <flux/Components.hpp>
 #include <flux/Damage.hpp>
 #include <flux/flux.hpp>
 
@@ -247,6 +248,106 @@ void test_overlay_anchoring() {
         const Element& menu = *root->children[1]->children[1];
         expect(near_eq(menu.x, 100.0f) && near_eq(menu.y, 90.0f),
                "overlay anchoring: below-rect popup");
+    }
+}
+
+void test_components() {
+    const Palette pal = palette(ThemeMode::light);
+
+    // tabs: strip + underline divider, callbacks carry the index.
+    {
+        int got = -99;
+        auto t = ui::tabs(pal, {L"One", L"Two"}, 1, [&](int i) { got = i; });
+        // strip(2 segments) + underline(2 segments)
+        expect(t->children.size() == 2 && t->children[0]->children.size() == 2,
+               "ui::tabs builds strip + underline");
+        t->children[0]->children[0]->props.on_click();
+        expect(got == 0, "ui::tabs callback carries index");
+        t->children[0]->children[1]->props.on_click();
+        expect(got == 1, "ui::tabs second tab callback");
+        expect(t->children[1]->children[1]->props.background.value_or(pal.surface)
+                   == pal.accent,
+               "ui::tabs underline marks the active tab");
+    }
+
+    // segmented: selected fills with accent; callback per segment.
+    {
+        int got = -1;
+        auto s = ui::segmented(pal, {L"A", L"B", L"C"}, 2, [&](int i) { got = i; });
+        expect(s->children.size() == 3, "ui::segmented has one child per option");
+        expect(s->children[2]->props.background.has_value(), "active segment filled");
+        s->children[0]->props.on_click();
+        expect(got == 0, "ui::segmented callback");
+    }
+
+    // pagination: clamps current, disables at edges, prev/next + pages.
+    {
+        int got = -1;
+        auto pg = ui::pagination(pal, 7, 5, [&](int i) { got = i; });
+        // < 1 2 3 4 5 > = 7 children; current clamped to 4 (last page).
+        expect(pg->children.size() == 7, "ui::pagination builds prev/pages/next");
+        expect(pg->children[0]->props.enabled, "prev enabled at last page (clamped)");
+        expect(!pg->children[6]->props.enabled, "next disabled at last page");
+        // Direct prop-click bypasses the Host's enabled gate, so the lambda
+        // still fires — the enabled flag is enforced at dispatch time.
+        pg->children[3]->props.on_click();
+        expect(got == 2, "page button callback");
+    }
+
+    // accordion: open section carries its body; toggle callback flips.
+    {
+        int got = -1;
+        auto body = label(L"content");
+        auto acc = ui::accordion(
+            pal,
+            {ui::AccordionSection{L"First", label(L"first body")},
+             ui::AccordionSection{L"Second", nullptr}},
+            0, [&](int i) { got = i; }, Props{});
+        // Section 0: header + body; section 1: header only.
+        expect(acc->children[0]->children.size() == 2, "open accordion section has body");
+        expect(acc->children[1]->children.size() == 1, "closed section is header-only");
+        acc->children[0]->children[0]->props.on_click();
+        expect(got == -1, "clicking the open section requests close (-1)");
+        acc->children[1]->children[0]->props.on_click();
+        expect(got == 1, "clicking a closed section opens it");
+    }
+
+    // alert/badge: kind colours differ, badge keeps its text.
+    {
+        auto a1 = ui::alert(pal, ui::AlertKind::info, L"hi");
+        auto a2 = ui::alert(pal, ui::AlertKind::danger, L"hi");
+        expect(a1->children[0]->props.background != a2->children[0]->props.background,
+               "ui::alert stripe colour follows the kind");
+        auto b = ui::badge(pal, ui::BadgeKind::success, L"3 new");
+        expect(b->props.text == L"3 new" && b->props.background.value() == pal.success,
+               "ui::badge keeps text and kind colour");
+    }
+
+    // ToastHost: show assigns ids; prune drops expired, returns next deadline.
+    {
+        ui::ToastHost th;
+        ui::toast_show(th, ui::ToastKind::info, L"one");
+        ui::toast_show(th, ui::ToastKind::danger, L"two");
+        expect(th.entries.size() == 2 && th.entries[0].id == 0 && th.entries[1].id == 1,
+               "toast_show assigns sequential ids");
+        th.entries[0].deadline_ms = 100;
+        th.entries[1].deadline_ms = 500;
+        expect(ui::prune_toasts(th, 200) == 500, "prune returns earliest live deadline");
+        expect(th.entries.size() == 1 && th.entries[0].id == 1,
+               "prune drops expired entries");
+        expect(ui::prune_toasts(th, 999) == 0, "empty host returns 0 deadline");
+    }
+
+    // ModalHost: show/close lifecycle.
+    {
+        ui::ModalHost mh;
+        bool closed = false;
+        ui::modal_show(mh, L"Title", nullptr, [&] { closed = true; });
+        expect(mh.current.has_value() && mh.current->title == L"Title",
+               "modal_show stores the spec");
+        mh.current->on_close();
+        ui::modal_close(mh);
+        expect(closed && !mh.current.has_value(), "modal_close clears after on_close");
     }
 }
 
@@ -576,6 +677,7 @@ int main() {
     test_justify();
     test_scroll_layout();
     test_overlay_anchoring();
+    test_components();
     test_builders();
     test_layout_row_grow();
     test_layout_column_center();
