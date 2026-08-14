@@ -17,6 +17,7 @@
 #include "DCompPresenter.hpp"
 #include "Damage.hpp"
 #include "HwndPresenter.hpp"
+#include "Animation.hpp"
 #include "Element.hpp"
 #include "Presenter.hpp"
 #include "Theme.hpp"
@@ -67,6 +68,21 @@ public:
     void set_root_builder(std::function<ElementPtr()> builder) noexcept;
     void request_render() noexcept;
 
+    // Keep the animation clock ticking for `ms` more milliseconds. Safe to
+    // call from builders (runs inside paint_frame): it only arms a timer;
+    // the ticks call request_render, which re-enters cleanly.
+    void animate_for(unsigned ms) noexcept;
+
+    // Read an Animated<T> for this frame's build and extend the animation
+    // clock until the tween settles. Builders call this instead of
+    // current() so frames keep arriving while the tween is in flight.
+    template <class T>
+    [[nodiscard]] T animate(const Animated<T>& a) noexcept {
+        const unsigned long long now = Animated<T>::now();
+        if (a.active_at(now)) animate_for(a.remaining_at(now) + 1);
+        return a.current_at(now);
+    }
+
     [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
     [[nodiscard]] ThemeMode theme_mode() const noexcept { return mode_; }
     void set_theme_mode(ThemeMode mode) noexcept;   // starts 200 ms cross-fade
@@ -95,7 +111,15 @@ private:
     void handle_size(unsigned width_px, unsigned height_px) noexcept;
     void handle_dpi_changed(unsigned dpi, const RECT& suggested) noexcept;
     void handle_timer() noexcept;
+    void update_cursor() noexcept;
     void destroy() noexcept;
+
+    // True while the theme fade or any animate_for() tween is in flight.
+    // Frames in this window are treated as fullscreen-dirty: partial-dirty
+    // only pays off when the scene is at rest.
+    [[nodiscard]] bool animating() const noexcept {
+        return fading_ || GetTickCount64() < anim_deadline_ms_;
+    }
 
     [[nodiscard]] float to_logical_px(int px) const noexcept;
     [[nodiscard]] const Element* hit_test(float lx, float ly, Path& path) const noexcept;
@@ -145,6 +169,20 @@ private:
     Path hover_path_;
     Path pressed_path_;
     Path focus_path_;
+    // Hover/press micro-transition state: the set as it was when it last
+    // changed, plus the change timestamp. render_element blends the
+    // highlight over motion_fast_ms while the animation clock keeps
+    // frames coming (animating() => fullscreen dirty).
+    Path hover_from_path_;
+    Path press_from_path_;
+    unsigned long long hover_change_ms_ = 0;
+    unsigned long long press_change_ms_ = 0;
+    // Last mouse position in logical units (WM_SETCURSOR hit-testing).
+    float last_mouse_lx_ = 0.0f;
+    float last_mouse_ly_ = 0.0f;
+    // Unified animation-clock deadline (animate_for). The WM_TIMER stays
+    // armed while now < deadline or a theme fade is running.
+    unsigned long long anim_deadline_ms_ = 0;
     // The text input currently receiving WM_CHAR. A click on a text_input
     // updates this path; WM_CHAR appends (and VK_BACK deletes) one char and
     // invokes the input's on_click handler with the new text. Empty path
@@ -163,8 +201,8 @@ private:
     // device for ID2D1RenderTarget creation).
     D2DRenderer renderer_;
 
-    static constexpr UINT_PTR fade_timer_id_ = 1;
-    static constexpr unsigned int fade_tick_ms_ = 16;
+    static constexpr UINT_PTR anim_timer_id_ = 1;   // was fade_timer_id_
+    static constexpr unsigned int anim_tick_ms_ = 16;   // ~60 fps tween steps
 
 #ifdef _DEBUG
     // ---- Frame-timing instrumentation (debug builds only) -----------------

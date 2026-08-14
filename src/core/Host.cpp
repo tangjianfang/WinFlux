@@ -211,7 +211,7 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 host->handle_char(wparam);
                 return 0;
             case WM_TIMER:
-                if (wparam == Host::fade_timer_id_) host->handle_timer();
+                if (wparam == Host::anim_timer_id_) host->handle_timer();
                 return 0;
             case WM_NCDESTROY:
                 host->hwnd_ = nullptr;
@@ -305,25 +305,34 @@ void Host::set_theme_mode(ThemeMode mode) noexcept {
     fade_to_ = flux::palette(mode);
     fade_start_ms_ = GetTickCount64();
     fading_ = true;
-    if (hwnd_ != nullptr) SetTimer(hwnd_, fade_timer_id_, fade_tick_ms_, nullptr);
+    animate_for(static_cast<unsigned>(tokens::theme_fade_ms));
     request_render();
 }
 
+void Host::animate_for(unsigned ms) noexcept {
+    if (ms == 0) return;
+    const unsigned long long deadline = GetTickCount64() + ms + 1;
+    if (deadline > anim_deadline_ms_) anim_deadline_ms_ = deadline;
+    if (hwnd_ != nullptr) SetTimer(hwnd_, anim_timer_id_, anim_tick_ms_, nullptr);
+}
+
 void Host::handle_timer() noexcept {
-    if (!fading_) {
-        if (hwnd_ != nullptr) KillTimer(hwnd_, fade_timer_id_);
-        return;
+    const unsigned long long now = GetTickCount64();
+    if (fading_) {
+        const float t = static_cast<float>(now - fade_start_ms_) /
+                        static_cast<float>(tokens::theme_fade_ms);
+        if (t >= 1.0f) {
+            shown_ = fade_to_;
+            fading_ = false;
+        } else {
+            shown_ = lerp_palette(fade_from_, fade_to_, ease_in_out(t));
+        }
     }
-    const unsigned long long elapsed = GetTickCount64() - fade_start_ms_;
-    const float t = static_cast<float>(elapsed) / static_cast<float>(tokens::theme_fade_ms);
-    if (t >= 1.0f) {
-        shown_ = fade_to_;
-        fading_ = false;
-        if (hwnd_ != nullptr) KillTimer(hwnd_, fade_timer_id_);
-    } else {
-        shown_ = lerp_palette(fade_from_, fade_to_, ease_in_out(t));
+    if (!fading_ && now >= anim_deadline_ms_) {
+        anim_deadline_ms_ = 0;
+        if (hwnd_ != nullptr) KillTimer(hwnd_, anim_timer_id_);
     }
-    request_render();
+    request_render();   // next tween step, or the settle frame
 }
 
 float Host::to_logical_px(int px) const noexcept {
@@ -605,11 +614,11 @@ void Host::handle_char(WPARAM ch) noexcept {
 void Host::paint_frame() noexcept {
     if (painting_ || !renderer_.valid()) return;
     // Short-circuit: if nothing has invalidated the scene since the last paint
-    // (and we don't owe a forced full repaint or a fade-interpolation frame),
-    // the DComp surface is still correct. Skipping avoids running the builder,
-    // flex_layout, and DamageTracker on stray WM_PAINTs that arrive between
-    // state mutations (window uncover, drag, etc.).
-    if (dirty_generation_ == last_painted_generation_ && !force_full_dirty_ && !fading_) {
+    // (and we don't owe a forced full repaint or an in-flight animation /
+    // fade frame), the DComp surface is still correct. Skipping avoids
+    // running the builder, flex_layout, and DamageTracker on stray WM_PAINTs
+    // that arrive between state mutations (window uncover, drag, etc.).
+    if (dirty_generation_ == last_painted_generation_ && !force_full_dirty_ && !animating()) {
         return;
     }
     PaintScope scope(painting_);
@@ -659,17 +668,17 @@ void Host::paint_frame() noexcept {
     const long long t_after_layout = qpc();
 #endif
 
-    // Compute damage. resize / DPI change / theme fade in progress force a
-    // fullscreen update; otherwise diff prev_tree_ against the new tree and
-    // also fold in interaction-state changes (hover/press/focus) that the
-    // structural diff can't see.
+    // Compute damage. resize / DPI change / any in-flight animation (theme
+    // fade or an animate_for tween) force a fullscreen update; otherwise
+    // diff prev_tree_ against the new tree and also fold in interaction-state
+    // changes (hover/press/focus) that the structural diff can't see.
     DamageTracker::InteractionState prev_interaction{
         prev_hover_path_, prev_pressed_path_, prev_focus_path_};
     DamageTracker::InteractionState next_interaction{
         hover_path_, pressed_path_, focus_path_};
 
     std::vector<Rect> dirty_rects;
-    if (force_full_dirty_ || fading_) {
+    if (force_full_dirty_ || animating()) {
         if (logical_w > 0.0f && logical_h > 0.0f) {
             dirty_rects.push_back(Rect{0.0f, 0.0f, logical_w, logical_h});
         }
