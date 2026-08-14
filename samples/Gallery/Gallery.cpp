@@ -11,14 +11,11 @@
 #include <algorithm>
 
 #include <flux/flux.hpp>
+#include <flux/Components.hpp>
 
 using namespace flux;
 
 namespace {
-
-// Forward-declared so App's State<std::vector<ToastEntry>> member can name
-// it before the overlay helpers (which hold the full definition) appear.
-struct ToastEntry;
 
 struct App {
     Host host;
@@ -51,12 +48,9 @@ struct App {
     State<int> inbox_selected;        // selected message id, -1 = none
     State<bool> media_playing;
     State<float> media_volume;        // 0..100
-    // Phase E overlay & feedback state.
-    State<std::vector<ToastEntry>> toasts;
-    int next_toast_id = 0;
-    State<bool> modal_open;
-    State<bool> tooltip_visible;
-    State<std::wstring> tooltip_hint;
+    // Phase E overlay & feedback state (Round 3: flux::ui hosts).
+    ui::ToastHost toast_host;
+    ui::ModalHost modal_host;
     // Phase F data viz state.
     State<int> cal_year;
     State<int> cal_month;       // 0..11
@@ -75,15 +69,7 @@ struct App {
     Animated<float> anim_progress{0.0f};
     Animated<Color> anim_color{rgb(59, 130, 246)};
     // Round 2 scroll & layer state.
-    State<bool> layer_modal_open;
     State<bool> layer_popup_open;
-    // Corner toast with an expiry deadline (ms, GetTickCount64 clock).
-    struct LayerToast {
-        unsigned long long deadline_ms;
-        std::wstring text;
-    };
-    std::vector<LayerToast> layer_toasts;
-    int next_layer_toast_seq = 0;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -251,13 +237,15 @@ ElementPtr header(App& app) {
 
     auto parent = view(std::move(header_p));
     parent->children.push_back(std::move(title_col));
+    Props theme_btn_p = button_secondary(pal);
+    theme_btn_p.tooltip_text = L"Cycles the theme: light -> dark -> high contrast";
     parent->children.push_back(button(next,
         [&app, mode] {
             app.host.set_theme_mode(mode == ThemeMode::light   ? ThemeMode::dark
                                    : mode == ThemeMode::dark  ? ThemeMode::high_contrast
                                                               : ThemeMode::light);
         },
-        button_secondary(pal)));
+        std::move(theme_btn_p)));
     return parent;
 }
 
@@ -753,453 +741,10 @@ ElementPtr pickers_right_section(App& app) {
     return section_card(L"Calendar", std::move(body), pal);
 }
 
-struct TabSpec { std::wstring label; std::wstring body; };
-
-ElementPtr tabs(const Palette& pal, std::vector<TabSpec> tabs_in, int active,
-                std::function<void(int)> on_change) {
-    Props outer_p;
-    outer_p.gap = 0.0f;
-    outer_p.direction = Direction::column;
-    auto outer = view(std::move(outer_p));
-
-    // Tab strip — accent text + bold indicates the active tab.
-    Props strip_p;
-    strip_p.gap = 0.0f;
-    strip_p.direction = Direction::row;
-    strip_p.align = Align::stretch;
-    auto strip = view(std::move(strip_p));
-    for (size_t i = 0; i < tabs_in.size(); ++i) {
-        const int idx = static_cast<int>(i);
-        const bool is_active = idx == active;
-        Props tab_p;
-        tab_p.flex_grow = 1.0f;
-        tab_p.height = 36.0f;
-        tab_p.padding = EdgeInsets{0.0f, static_cast<float>(tokens::spacing_sm),
-                                   0.0f, static_cast<float>(tokens::spacing_sm)};
-        tab_p.text = tabs_in[i].label;
-        tab_p.text_color = is_active ? pal.accent : pal.text_secondary;
-        tab_p.font_size_pt = tokens::font_body;
-        tab_p.bold = is_active;
-        tab_p.text_align = Align::center;
-        tab_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
-        auto tab = label(tabs_in[i].label, std::move(tab_p));
-        strip->children.push_back(std::move(tab));
-    }
-    outer->children.push_back(std::move(strip));
-
-    Props div_p;
-    div_p.background = pal.divider;
-    div_p.height = 1.0f;
-    outer->children.push_back(view(std::move(div_p)));
-
-    Props body_p;
-    body_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md), 0.0f, 0.0f, 0.0f};
-    body_p.text_color = pal.text;
-    body_p.font_size_pt = tokens::font_body;
-    body_p.text_align = Align::start;
-    const std::wstring content = (active >= 0 && active < static_cast<int>(tabs_in.size()))
-                                     ? tabs_in[active].body
-                                     : L"";
-    outer->children.push_back(label(content, std::move(body_p)));
-
-    return outer;
-}
-
-ElementPtr accordion(const Palette& pal, std::vector<TabSpec> items,
-                     int expanded, std::function<void(int)> on_toggle) {
-    Props outer_p;
-    outer_p.gap = static_cast<float>(tokens::spacing_xs);
-    outer_p.direction = Direction::column;
-    auto outer = view(std::move(outer_p));
-
-    for (size_t i = 0; i < items.size(); ++i) {
-        const int idx = static_cast<int>(i);
-        const bool is_open = idx == expanded;
-
-        Props item_p;
-        item_p.gap = 0.0f;
-        item_p.direction = Direction::column;
-        item_p.radius = static_cast<float>(tokens::radius_md);
-        item_p.border_color = pal.border;
-        item_p.border_width = 1.0f;
-        item_p.background = pal.surface;
-        item_p.padding = EdgeInsets{0.0f, 0.0f, 0.0f, 0.0f};
-        auto item = view(std::move(item_p));
-
-        Props header_p;
-        header_p.gap = static_cast<float>(tokens::spacing_sm);
-        header_p.direction = Direction::row;
-        header_p.align = Align::center;
-        header_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
-                                      static_cast<float>(tokens::spacing_md),
-                                      static_cast<float>(tokens::spacing_md),
-                                      static_cast<float>(tokens::spacing_md)};
-        header_p.on_click = [on_toggle, idx, is_open] {
-            if (on_toggle) on_toggle(is_open ? -1 : idx);
-        };
-        auto header = view(std::move(header_p));
-
-        Props title_p;
-        title_p.text = items[i].label;
-        title_p.text_color = pal.text;
-        title_p.font_size_pt = tokens::font_body;
-        title_p.bold = true;
-        title_p.text_align = Align::start;
-        title_p.flex_grow = 1.0f;
-        header->children.push_back(label(items[i].label, std::move(title_p)));
-
-        Props chev_p;
-        chev_p.text = is_open ? L"v" : L">";
-        chev_p.text_color = pal.text_secondary;
-        chev_p.font_size_pt = tokens::font_caption;
-        chev_p.text_align = Align::center;
-        header->children.push_back(label(chev_p.text, chev_p));
-
-        item->children.push_back(std::move(header));
-
-        if (is_open) {
-            Props body_p;
-            body_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
-                                        static_cast<float>(tokens::spacing_md),
-                                        static_cast<float>(tokens::spacing_md),
-                                        static_cast<float>(tokens::spacing_md)};
-            body_p.text_color = pal.text_secondary;
-            body_p.font_size_pt = tokens::font_body;
-            body_p.text_align = Align::start;
-            item->children.push_back(label(items[i].body, std::move(body_p)));
-        }
-        outer->children.push_back(std::move(item));
-    }
-    return outer;
-}
-
-ElementPtr segmented_control(const Palette& pal, std::vector<std::wstring> options,
-                             int selected, std::function<void(int)> on_change) {
-    Props outer_p;
-    outer_p.gap = 0.0f;
-    outer_p.direction = Direction::row;
-    outer_p.radius = static_cast<float>(tokens::radius_control);
-    outer_p.border_color = pal.border;
-    outer_p.border_width = 1.0f;
-    outer_p.padding = EdgeInsets{0.0f, 0.0f, 0.0f, 0.0f};
-    outer_p.align = Align::stretch;
-    auto outer = view(std::move(outer_p));
-
-    for (size_t i = 0; i < options.size(); ++i) {
-        const int idx = static_cast<int>(i);
-        const bool is_sel = idx == selected;
-        Props seg_p;
-        seg_p.flex_grow = 1.0f;
-        seg_p.height = static_cast<float>(tokens::control_height_sm);
-        seg_p.text = options[i];
-        seg_p.text_color = is_sel ? pal.on_accent : pal.text;
-        seg_p.background = is_sel
-                                ? std::optional<Color>{pal.accent}
-                                : std::nullopt;
-        seg_p.font_size_pt = tokens::font_caption;
-        seg_p.text_align = Align::center;
-        seg_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
-        auto seg = label(options[i], std::move(seg_p));
-        outer->children.push_back(std::move(seg));
-    }
-    return outer;
-}
-
-ElementPtr pagination(const Palette& pal, int current, int total,
-                      std::function<void(int)> on_change) {
-    Props outer_p;
-    outer_p.gap = static_cast<float>(tokens::spacing_xs);
-    outer_p.direction = Direction::row;
-    outer_p.align = Align::center;
-    auto outer = view(std::move(outer_p));
-
-    auto mk_btn = [&](const std::wstring& txt, bool enabled, int next) {
-        Props p;
-        p.width = 28.0f;
-        p.height = 28.0f;
-        p.radius = static_cast<float>(tokens::radius_sm);
-        p.text = txt;
-        p.text_color = enabled ? pal.text : pal.text_secondary;
-        p.font_size_pt = tokens::font_body;
-        p.text_align = Align::center;
-        p.enabled = enabled;
-        p.on_click = [on_change, next] { if (on_change) on_change(next); };
-        return label(txt, std::move(p));
-    };
-    outer->children.push_back(mk_btn(L"<", current > 0, current - 1));
-    for (int p = 0; p < total; ++p) {
-        const bool is_cur = p == current;
-        Props pg_p;
-        pg_p.width = 28.0f;
-        pg_p.height = 28.0f;
-        pg_p.radius = static_cast<float>(tokens::radius_sm);
-        pg_p.text = std::to_wstring(p + 1);
-        pg_p.text_color = is_cur ? pal.on_accent : pal.text;
-        pg_p.background = is_cur
-                                ? std::optional<Color>{pal.accent}
-                                : std::nullopt;
-        pg_p.font_size_pt = tokens::font_caption;
-        pg_p.text_align = Align::center;
-        pg_p.on_click = [on_change, p] { if (on_change) on_change(p); };
-        outer->children.push_back(label(pg_p.text, pg_p));
-    }
-    outer->children.push_back(mk_btn(L">", current < total - 1, current + 1));
-    return outer;
-}
-
-ElementPtr alert(const Palette& pal, const wchar_t* kind, const wchar_t* text,
-                 ClickHandler on_dismiss) {
-    (void)kind;
-    Props p;
-    p.gap = static_cast<float>(tokens::spacing_md);
-    p.direction = Direction::row;
-    p.align = Align::center;
-    p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md),
-                           static_cast<float>(tokens::spacing_md),
-                           static_cast<float>(tokens::spacing_md),
-                           static_cast<float>(tokens::spacing_md)};
-    p.radius = static_cast<float>(tokens::radius_md);
-    p.background = pal.surface_variant;
-    auto row = view(std::move(p));
-
-    Props txt;
-    txt.text = text;
-    txt.text_color = pal.text;
-    txt.font_size_pt = tokens::font_body;
-    txt.text_align = Align::start;
-    txt.flex_grow = 1.0f;
-    row->children.push_back(label(text, std::move(txt)));
-
-    Props x_p;
-    x_p.width = 24.0f;
-    x_p.height = 24.0f;
-    x_p.text = L"x";
-    x_p.text_color = pal.text_secondary;
-    x_p.font_size_pt = tokens::font_caption;
-    x_p.text_align = Align::center;
-    x_p.on_click = std::move(on_dismiss);
-    row->children.push_back(label(x_p.text, x_p));
-
-    return row;
-}
-
-
-// ---- Phase E: Overlays & Feedback -------------------------------------------
-//
-// Toast / Modal / Tooltip / Badge. None of these need a new framework
-// element type — they're compositions of existing primitives plus host-side
-// State<T> for the open/close transitions. The point of Phase E is to show
-// that the framework composes into the standard "feedback" UI vocabulary:
-// notifications, dialogs, hover hints, and inline status pills.
-
-struct ToastEntry {
-    int id;
-    std::wstring text;
-    std::wstring kind;       // "info" | "success" | "warning" | "danger"
-};
-
-// Tiny inline pill. Used inside rows to mark items (counts, status, kind).
-// `kind` picks the colour scheme; default is the brand accent. Renders as a
-// label with a fully-rounded radius and horizontal padding so it looks like a
-// chip in a row of text.
-ElementPtr badge(const Palette& pal, const std::wstring& text,
-                 const wchar_t* kind = L"accent") {
-    Color bg = pal.accent;
-    Color fg = pal.on_accent;
-    if      (std::wcscmp(kind, L"success") == 0) { bg = pal.success; }
-    else if (std::wcscmp(kind, L"warning") == 0) { bg = pal.warning; }
-    else if (std::wcscmp(kind, L"danger")  == 0) { bg = pal.danger;  }
-    else if (std::wcscmp(kind, L"info")    == 0) { bg = pal.info;    }
-    else if (std::wcscmp(kind, L"neutral") == 0) { bg = pal.surface_variant; fg = pal.text_secondary; }
-
-    Props p;
-    p.background = bg;
-    p.text_color = fg;
-    p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_xs)};
-    p.radius = 999.0f;
-    p.font_size_pt = tokens::font_caption;
-    return label(text, std::move(p));
-}
-
 // One toast card. The accent stripe on the left picks up the entry's kind
 // (the same palette role as the dot in the Inbox unread badges). The close
 // button is a square 24-px button with a subtle hover background so it reads
 // as a dismiss control, not as primary chrome.
-ElementPtr toast_bar(const Palette& pal, const ToastEntry& entry,
-                     ClickHandler on_close) {
-    Color accent = pal.info;
-    if      (entry.kind == L"success") accent = pal.success;
-    else if (entry.kind == L"warning") accent = pal.warning;
-    else if (entry.kind == L"danger")  accent = pal.danger;
-
-    Props outer_p;
-    outer_p.background = pal.surface;
-    outer_p.border_color = pal.border;
-    outer_p.border_width = 1.0f;
-    outer_p.radius = static_cast<float>(tokens::radius_card);
-    outer_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_md),
-        static_cast<float>(tokens::spacing_md),
-        static_cast<float>(tokens::spacing_md),
-        static_cast<float>(tokens::spacing_md)};
-    outer_p.direction = Direction::row;
-    outer_p.align = Align::center;
-    outer_p.gap = static_cast<float>(tokens::spacing_md);
-    auto outer = view(std::move(outer_p));
-
-    Props stripe_p;
-    stripe_p.background = accent;
-    stripe_p.width = 4.0f;
-    stripe_p.height = 32.0f;
-    stripe_p.radius = static_cast<float>(tokens::radius_sm);
-    outer->children.push_back(view(std::move(stripe_p)));
-
-    Props label_p;
-    label_p.text = entry.text;
-    label_p.text_color = pal.text;
-    label_p.font_size_pt = tokens::font_body;
-    label_p.text_align = Align::start;
-    label_p.flex_grow = 1.0f;
-    outer->children.push_back(label(entry.text, std::move(label_p)));
-
-    Props close_p;
-    close_p.text = L"×";
-    close_p.text_color = pal.text_secondary;
-    close_p.font_size_pt = tokens::font_subtitle;
-    close_p.text_align = Align::center;
-    close_p.width = 24.0f;
-    close_p.height = 24.0f;
-    close_p.radius = 12.0f;
-    close_p.hover_background = pal.surface_variant;
-    close_p.on_click = std::move(on_close);
-    outer->children.push_back(label(close_p.text, close_p));
-
-    return outer;
-}
-
-// Modal dialog: a centred card with title, body, and a single Close action.
-// The Host has no z-order primitive, so this demo renders the modal as a
-// regular card that overlays the rest of the body content via being the
-// LAST child of root. No dimmed backdrop — the body content stays readable
-// behind the card; production modals would add a backdrop element that
-// captures clicks outside the card to dismiss.
-ElementPtr modal_card(const Palette& pal, const std::wstring& title,
-                      ElementPtr body, ClickHandler on_close) {
-    Props card_p;
-    card_p.background = pal.surface;
-    card_p.border_color = pal.border;
-    card_p.border_width = 1.0f;
-    card_p.radius = static_cast<float>(tokens::radius_lg);
-    card_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_lg),
-        static_cast<float>(tokens::spacing_lg),
-        static_cast<float>(tokens::spacing_lg),
-        static_cast<float>(tokens::spacing_lg)};
-    card_p.direction = Direction::column;
-    card_p.gap = static_cast<float>(tokens::spacing_md);
-    card_p.width = 480.0f;
-    auto card = view(std::move(card_p));
-
-    Props title_p;
-    title_p.text = title;
-    title_p.font_size_pt = tokens::font_title;
-    title_p.text_color = pal.text;
-    title_p.text_align = Align::start;
-    card->children.push_back(label(title, std::move(title_p)));
-
-    if (body) card->children.push_back(std::move(body));
-
-    Props actions_p;
-    actions_p.direction = Direction::row;
-    actions_p.align = Align::end;
-    actions_p.gap = static_cast<float>(tokens::spacing_md);
-    auto actions = view(std::move(actions_p));
-
-    Props close_p = button_secondary(pal);
-    close_p.text = L"Close";
-    close_p.on_click = on_close;
-    actions->children.push_back(button(L"Close", on_close, std::move(close_p)));
-    card->children.push_back(std::move(actions));
-
-    return card;
-}
-
-// Tooltip demo: a button that, on hover, reveals a popup with explanatory
-// text. The Host already tracks hover_path_, but per-element show/hide
-// timers need a delay before the popup appears (otherwise it flashes
-// during the cursor's transit). This demo omits the delay — the popup
-// shows immediately on hover via a State<bool> keyed off the button's
-// hover state. The Host doesn't expose a "hovered" flag on Props yet, so
-// we wire it through on_click toggling for visibility: each hover fires
-// a state flip. This is a simplification; a real tooltip would use a
-// render-element branch keyed off hover_path_.
-ElementPtr tooltip_demo(App& app, const Palette& pal,
-                        const std::wstring& label_text,
-                        const std::wstring& hint) {
-    // The State<bool> lives as a member of App; for the demo each tooltip
-    // reuses one slot via the index passed in via label suffix. Cleaner:
-    // allocate locally. Since App is rebuilt every frame, we keep the
-    // visibility in a per-tooltip slot keyed by an offset into App.
-    // For simplicity: track the last-hovered tooltip id in App.
-    Props trigger_p = button_secondary(pal);
-    trigger_p.text = label_text;
-    trigger_p.on_click = [&app, hint_copy = hint] {
-        // Click toggles a transient message that the host shows in the
-        // popup. The popup is rendered right below.
-        app.tooltip_hint.set(std::move(hint_copy));
-        app.tooltip_visible.set(true);
-    };
-    auto trigger = button(label_text, {}, std::move(trigger_p));
-
-    Props popup_p;
-    popup_p.background = pal.surface;
-    popup_p.border_color = pal.border;
-    popup_p.border_width = 1.0f;
-    popup_p.radius = static_cast<float>(tokens::radius_md);
-    popup_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm)};
-    popup_p.direction = Direction::row;
-    popup_p.align = Align::center;
-    popup_p.gap = static_cast<float>(tokens::spacing_sm);
-
-    Props popup_label_p;
-    popup_label_p.text = hint;
-    popup_label_p.text_color = pal.text_secondary;
-    popup_label_p.font_size_pt = tokens::font_caption;
-    popup_label_p.text_align = Align::start;
-
-    auto popup = view(std::move(popup_p));
-    popup->children.push_back(label(hint, std::move(popup_label_p)));
-
-    // Stack the trigger on top of the popup; the popup only shows when the
-    // State is true. Without a "visible" Props flag we conditionally
-    // include it in the tree.
-    ElementPtr popup_elt;
-    if (app.tooltip_visible.get()) {
-        popup_elt = std::move(popup);
-    } else {
-        Props empty_p;
-        empty_p.height = 0.0f;
-        popup_elt = view(std::move(empty_p));
-    }
-
-    Props col_p;
-    col_p.direction = Direction::column;
-    col_p.gap = static_cast<float>(tokens::spacing_xs);
-    col_p.align = Align::start;
-    auto col = view(std::move(col_p));
-    col->children.push_back(std::move(trigger));
-    col->children.push_back(std::move(popup_elt));
-    return col;
-}
-
 ElementPtr overlays_section(App& app) {
     const Palette& pal = app.host.palette();
 
@@ -1208,161 +753,73 @@ ElementPtr overlays_section(App& app) {
     caption_p.font_size_pt = tokens::font_caption;
     caption_p.text_align = Align::start;
 
-    // ---- Toast demo ----
-    auto push_toast = [&](const std::wstring& kind, const std::wstring& text) {
-        auto v = app.toasts.get();
-        v.push_back({app.next_toast_id++, text, kind});
-        app.toasts.set(std::move(v));
+    // ---- Toasts: ui::toast_show queues; the corner stack is declared by
+    // declare_layer_overlays via ui::overlay_toasts every frame.
+    auto toast_btn = [&](const wchar_t* label_text, ui::ToastKind kind,
+                         const wchar_t* text) {
+        Props p = button_secondary(pal);
+        p.tooltip_text = L"Pushes a corner toast (auto-expires)";
+        return button(label_text, [&app, kind, text] {
+            ui::toast_show(app.toast_host, kind, text);
+            app.host.request_render();
+        }, std::move(p));
     };
-    // Captures by value (not [&]) so the resulting std::function can be
-    // copied into each toast_bar's on_click. The `app` reference is captured
-    // by reference but `app` outlives every toast (it's the long-lived host
-    // state), so this is safe.
-    std::function<void(int)> dismiss_toast = [&app](int id) {
-        auto v = app.toasts.get();
-        v.erase(std::remove_if(v.begin(), v.end(),
-            [id](const ToastEntry& e) { return e.id == id; }), v.end());
-        app.toasts.set(std::move(v));
-    };
-
-    Props info_btn_p = button_primary(pal);
-    info_btn_p.text = L"Info";
-    info_btn_p.on_click = [&] { push_toast(L"info", L"New message in your inbox."); };
-
-    Props success_btn_p = button_secondary(pal);
-    success_btn_p.text = L"Success";
-    success_btn_p.on_click = [&] { push_toast(L"success", L"Profile saved."); };
-
-    Props warning_btn_p = button_secondary(pal);
-    warning_btn_p.text = L"Warning";
-    warning_btn_p.on_click = [&] { push_toast(L"warning", L"Storage almost full."); };
-
-    Props danger_btn_p = button_secondary(pal);
-    danger_btn_p.text = L"Danger";
-    danger_btn_p.on_click = [&] { push_toast(L"danger", L"Failed to delete file."); };
-
     auto toast_buttons = row_view({
-        button(L"Info",    [&] { push_toast(L"info",    L"New message in your inbox."); }, std::move(info_btn_p)),
-        button(L"Success", [&] { push_toast(L"success", L"Profile saved.");             }, std::move(success_btn_p)),
-        button(L"Warning", [&] { push_toast(L"warning", L"Storage almost full.");       }, std::move(warning_btn_p)),
-        button(L"Danger",  [&] { push_toast(L"danger",  L"Failed to delete file.");     }, std::move(danger_btn_p)),
+        toast_btn(L"Info",    ui::ToastKind::info,    L"New message in your inbox."),
+        toast_btn(L"Success", ui::ToastKind::success, L"Profile saved."),
+        toast_btn(L"Warning", ui::ToastKind::warning, L"Storage almost full."),
+        toast_btn(L"Danger",  ui::ToastKind::danger,  L"Failed to delete file."),
     }, static_cast<float>(tokens::spacing_sm), Align::start);
 
-    Props toast_stack_p;
-    toast_stack_p.direction = Direction::column;
-    toast_stack_p.gap = static_cast<float>(tokens::spacing_sm);
-    toast_stack_p.align = Align::stretch;
-    auto toast_stack = view(std::move(toast_stack_p));
-    auto entries = app.toasts.get();
-    if (entries.empty()) {
-        Props empty_p;
-        empty_p.text = L"No toasts yet — click a button above.";
-        empty_p.text_color = pal.text_secondary;
-        empty_p.font_size_pt = tokens::font_caption;
-        empty_p.text_align = Align::start;
-        toast_stack->children.push_back(label(empty_p.text, empty_p));
-    } else {
-        for (const auto& entry : entries) {
-            int id = entry.id;
-            toast_stack->children.push_back(toast_bar(pal, entry,
-                [dismiss = dismiss_toast, id] { dismiss(id); }));
-        }
-    }
-
-    // ---- Modal demo ----
-    auto open_modal = [&app] { app.modal_open.set(true); };
-    auto close_modal = [&app] { app.modal_open.set(false); };
-
+    // ---- Modal: real scrim + centred card (Esc / scrim click close).
+    auto open_modal = [&] {
+        Props body_p;
+        body_p.text = L"This dialog is a real overlay: scrim blocks the page, "
+                      L"Esc and clicking outside close it.";
+        body_p.text_color = pal.text;
+        body_p.font_size_pt = tokens::font_body;
+        body_p.text_align = Align::start;
+        ui::modal_show(app.modal_host, L"Confirm action",
+                       label(body_p.text, body_p),
+                       [] { /* state is app-driven; nothing else to do */ });
+        app.host.request_render();
+    };
     Props open_btn_p = button_primary(pal);
-    open_btn_p.text = L"Open modal";
-    open_btn_p.on_click = open_modal;
+    open_btn_p.tooltip_text = L"Opens the ui::modal_show overlay";
+    auto modal_trigger = row_view({
+        button(L"Open modal", open_modal, std::move(open_btn_p)),
+    }, static_cast<float>(tokens::spacing_sm), Align::start);
 
-    Props modal_body_p;
-    modal_body_p.text = L"This is a centred dialog. Click Close to dismiss.";
-    modal_body_p.text_color = pal.text;
-    modal_body_p.font_size_pt = tokens::font_body;
-    modal_body_p.text_align = Align::start;
-    auto modal_body = label(modal_body_p.text, modal_body_p);
+    // ---- Badges ----
+    auto badge_row = row_view({
+        ui::badge(pal, ui::BadgeKind::info,    L"3 unread"),
+        ui::badge(pal, ui::BadgeKind::success, L"Saved"),
+        ui::badge(pal, ui::BadgeKind::warning, L"Pending"),
+        ui::badge(pal, ui::BadgeKind::danger,  L"Error"),
+        ui::badge(pal, ui::BadgeKind::accent,  L"Default"),
+        ui::badge(pal, ui::BadgeKind::neutral, L"Draft"),
+    }, static_cast<float>(tokens::spacing_sm), Align::center);
 
-    ElementPtr modal_area;
-    if (app.modal_open.get()) {
-        Props wrapper_p;
-        wrapper_p.direction = Direction::column;
-        wrapper_p.gap = static_cast<float>(tokens::spacing_md);
-        wrapper_p.align = Align::stretch;
-        auto wrapper = view(std::move(wrapper_p));
-        wrapper->children.push_back(modal_card(pal, L"Confirm action",
-            std::move(modal_body), close_modal));
-        Props note_p;
-        note_p.text = L"Modal is open. The card above is the dialog.";
-        note_p.text_color = pal.text_secondary;
-        note_p.font_size_pt = tokens::font_caption;
-        note_p.text_align = Align::start;
-        wrapper->children.push_back(label(note_p.text, note_p));
-        modal_area = std::move(wrapper);
-    } else {
-        Props trigger_row_p;
-        trigger_row_p.direction = Direction::row;
-        trigger_row_p.align = Align::start;
-        trigger_row_p.gap = static_cast<float>(tokens::spacing_md);
-        auto trigger_row = view(std::move(trigger_row_p));
-        trigger_row->children.push_back(
-            button(L"Open modal", open_modal, std::move(open_btn_p)));
-        modal_area = std::move(trigger_row);
-    }
-
-    // ---- Badge examples ----
-    Props badge_row_p;
-    badge_row_p.direction = Direction::row;
-    badge_row_p.gap = static_cast<float>(tokens::spacing_sm);
-    badge_row_p.align = Align::center;
-    auto badge_row = view(std::move(badge_row_p));
-    badge_row->children.push_back(badge(pal, L"3 unread",  L"info"));
-    badge_row->children.push_back(badge(pal, L"Saved",     L"success"));
-    badge_row->children.push_back(badge(pal, L"Pending",   L"warning"));
-    badge_row->children.push_back(badge(pal, L"Error",     L"danger"));
-    badge_row->children.push_back(badge(pal, L"Default",   L"accent"));
-    badge_row->children.push_back(badge(pal, L"Draft",     L"neutral"));
-
-    // ---- Tooltip demo ----
-    auto dismiss_tip = [&app] { app.tooltip_visible.set(false); };
-    auto tip1 = tooltip_demo(app, pal, L"Save",
-        L"Save your changes to disk (Ctrl+S).");
-    auto tip2 = tooltip_demo(app, pal, L"Delete",
-        L"Permanently delete the selected item.");
-    auto tip3 = tooltip_demo(app, pal, L"Settings",
-        L"Open application settings and preferences.");
-
-    Props tip_row_p;
-    tip_row_p.direction = Direction::row;
-    tip_row_p.gap = static_cast<float>(tokens::spacing_md);
-    tip_row_p.align = Align::start;
-    auto tip_row = view(std::move(tip_row_p));
-    tip_row->children.push_back(std::move(tip1));
-    tip_row->children.push_back(std::move(tip2));
-    tip_row->children.push_back(std::move(tip3));
-    // A small dismiss control so the tooltip popup can be cleared without
-    // clicking each button again.
-    Props dismiss_tip_p = button_secondary(pal);
-    dismiss_tip_p.text = L"Hide";
-    dismiss_tip_p.on_click = dismiss_tip;
-    Props dismiss_p;
-    dismiss_p.direction = Direction::row;
-    dismiss_p.align = Align::end;
-    auto dismiss_row = view(std::move(dismiss_p));
-    dismiss_row->children.push_back(
-        button(L"Hide hint", dismiss_tip, std::move(dismiss_tip_p)));
-    tip_row->children.push_back(std::move(dismiss_row));
+    // ---- Tooltips: host-native — dwell on a button for ~280 ms.
+    auto tip_btn = [&](const wchar_t* label_text, const wchar_t* hint) {
+        Props p = button_secondary(pal);
+        p.tooltip_text = hint;
+        return button(label_text, [] {}, std::move(p));
+    };
+    auto tip_row = row_view({
+        tip_btn(L"Save",     L"Save your changes to disk (Ctrl+S)."),
+        tip_btn(L"Delete",   L"Permanently delete the selected item."),
+        tip_btn(L"Settings", L"Open application settings and preferences."),
+    }, static_cast<float>(tokens::spacing_md), Align::start);
 
     auto body = col_view({
-        label(L"Badges",                         caption_p),
+        label(L"Badges", caption_p),
         badge_row,
-        label(L"Toasts (click to push)",         caption_p),
+        label(L"Toasts (click to push, auto-expire)", caption_p),
         toast_buttons,
-        toast_stack,
-        label(L"Modal dialog",                   caption_p),
-        modal_area,
-        label(L"Tooltips (click button to show hint)", caption_p),
+        label(L"Modal dialog", caption_p),
+        modal_trigger,
+        label(L"Tooltips (hover ~0.3s)", caption_p),
         tip_row,
     }, static_cast<float>(tokens::spacing_md));
 
@@ -1459,7 +916,7 @@ ElementPtr settings_section(App& app) {
         lang_lbl.font_size_pt = tokens::font_caption;
         lang_lbl.text_align = Align::start;
         panel->children.push_back(label(L"Language", std::move(lang_lbl)));
-        panel->children.push_back(segmented_control(pal,
+        panel->children.push_back(ui::segmented(pal,
             {L"English", L"中文", L"日本語"},
             app.settings_language.get(),
             [&app](int v) { app.settings_language.set(v); }));
@@ -1628,7 +1085,7 @@ ElementPtr inbox_section(App& app) {
     }
 
     // ---- Pagination strip ----
-    auto page_strip = pagination(pal, page, total_pages,
+    auto page_strip = ui::pagination(pal, page, total_pages,
         [&app](int p) { app.inbox_page.set(p); });
 
     Props body_p;
@@ -1839,26 +1296,45 @@ ElementPtr media_player_section(App& app) {
 ElementPtr patterns_left_section(App& app) {
     const Palette& pal = app.host.palette();
 
-    std::vector<TabSpec> tab_specs = {
-        {L"Overview", L"A snapshot of recent activity — keep an eye on what matters."},
-        {L"Activity", L"Your last 10 actions show up here, newest at the top."},
-        {L"Settings", L"Tweak the things only you can see — your account, your data."},
+    // ui::tabs is the strip; the demo composes its own body panel below.
+    const wchar_t* tab_bodies[] = {
+        L"A snapshot of recent activity — keep an eye on what matters.",
+        L"Your last 10 actions show up here, newest at the top.",
+        L"Tweak the things only you can see — your account, your data.",
     };
-    auto tab_block = tabs(pal, tab_specs, app.active_tab.get(),
-        [&app](int i) { app.active_tab.set(i); });
+    auto tab_strip = ui::tabs(pal, {L"Overview", L"Activity", L"Settings"},
+                              app.active_tab.get(),
+                              [&app](int i) { app.active_tab.set(i); });
+    Props body_p;
+    body_p.text = tab_bodies[app.active_tab.get()];
+    body_p.text_color = pal.text;
+    body_p.font_size_pt = tokens::font_body;
+    body_p.text_align = Align::start;
+    body_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_md), 0.0f, 0.0f, 0.0f};
+    auto tab_block = col_view({std::move(tab_strip), label(body_p.text, body_p)},
+                              static_cast<float>(tokens::spacing_xs));
 
-    std::vector<TabSpec> acc_specs = {
-        {L"What is WinFlux?",      L"A single-HWND C++20 UI framework with a declarative scene tree."},
-        {L"How does damage work?", L"The diff is structural; hover/press/focus feed the partial repaint."},
-        {L"License?",              L"This sample is MIT — adopt the pattern, not the project."},
+    const auto acc_body = [&](const wchar_t* text) {
+        Props bp;
+        bp.text = text;
+        bp.text_color = pal.text_secondary;
+        bp.font_size_pt = tokens::font_body;
+        bp.text_align = Align::start;
+        return label(text, bp);
     };
-    auto acc_block = accordion(pal, acc_specs, app.expanded_section.get(),
+    auto acc_block = ui::accordion(pal,
+        {ui::AccordionSection{L"What is WinFlux?",
+                              acc_body(L"A single-HWND C++20 UI framework with a declarative scene tree.")},
+         ui::AccordionSection{L"How does damage work?",
+                              acc_body(L"The diff is structural; hover/press/focus feed the partial repaint.")},
+         ui::AccordionSection{L"License?",
+                              acc_body(L"This sample is MIT — adopt the pattern, not the project.")}},
+        app.expanded_section.get(),
         [&app](int i) { app.expanded_section.set(i); });
 
-    auto seg = segmented_control(pal,
-        std::vector<std::wstring>{L"List", L"Grid", L"Compact"},
-        app.view_mode.get(),
-        [&app](int i) { app.view_mode.set(i); });
+    auto seg = ui::segmented(pal, {L"List", L"Grid", L"Compact"},
+                             app.view_mode.get(),
+                             [&app](int i) { app.view_mode.set(i); });
 
     Props caption_p;
     caption_p.text_color = pal.text_secondary;
@@ -1880,13 +1356,12 @@ ElementPtr patterns_left_section(App& app) {
 ElementPtr patterns_right_section(App& app) {
     const Palette& pal = app.host.palette();
 
-    auto pag = pagination(pal, app.inbox_page.get(), 6,
-        [&app](int i) { app.inbox_page.set(i); });
+    auto pag = ui::pagination(pal, app.inbox_page.get(), 6,
+                              [&app](int i) { app.inbox_page.set(i); });
 
-    auto dismiss_alert = [&app] { app.show_alert.set(false); };
     ElementPtr al;
     if (app.show_alert.get()) {
-        al = alert(pal, L"info", L"This alert dismisses with the x button.", dismiss_alert);
+        al = ui::alert(pal, ui::AlertKind::info, L"This alert dismisses with the x button.");
     } else {
         Props empty_p;
         empty_p.height = 1.0f;
@@ -2372,15 +1847,21 @@ ElementPtr scroll_layer_section(App& app) {
 
     // Overlay triggers.
     auto triggers = row_view({
-        button(L"Open modal", [&app] { app.layer_modal_open.set(true); },
-              button_primary(pal)),
+        button(L"Open modal", [&app] {
+            Props body_p;
+            body_p.text = L"Scrim blocks the page, Esc / clicking outside closes.";
+            body_p.text_color = app.host.palette().text;
+            body_p.font_size_pt = tokens::font_body;
+            body_p.text_align = Align::start;
+            ui::modal_show(app.modal_host, L"A real modal",
+                           label(body_p.text, body_p), [] {});
+            app.host.request_render();
+        }, button_primary(pal)),
         button(L"Popup at click", [&app] { app.layer_popup_open.set(true); },
               button_secondary(pal)),
         button(L"Corner toast", [&app] {
-            const int seq = app.next_layer_toast_seq++;
-            app.layer_toasts.push_back({GetTickCount64() + 2200,
-                                        L"Toast " + std::to_wstring(seq) +
-                                            L" — auto-expires"});
+            ui::toast_show(app.toast_host, ui::ToastKind::info,
+                           L"Toast — auto-expires");
             app.host.request_render();
         }, button_secondary(pal)),
     }, static_cast<float>(tokens::spacing_sm), Align::start);
@@ -2393,140 +1874,55 @@ ElementPtr scroll_layer_section(App& app) {
     return section_card(L"Scroll & Layer", std::move(body), pal);
 }
 
-// Overlay roots declared from build() every frame (declarative lifetime).
+// Overlay roots declared from build() every frame (declarative lifetime):
+// the modal + toast stacks come from flux::ui; the anchored popup is the
+// hand-rolled Round 2 demo kept to showcase the raw anchoring pattern.
 void declare_layer_overlays(App& app) {
     Host& host = app.host;
     const Palette& pal = host.palette();
+    ui::overlay_modal(host, app.modal_host, pal);
+    ui::overlay_toasts(host, app.toast_host, pal);
 
-    // 1) Modal: full-canvas scrim + centred card. Scrim click / Esc run the
-    //    root's on_click (close).
-    if (app.layer_modal_open.get()) {
-        Props scrim;
-        scrim.background = rgba(0, 0, 0, 96);
-        scrim.direction = Direction::column;
-        scrim.justify = Justify::center;
-        scrim.align = Align::center;
-        scrim.on_click = [&app] { app.layer_modal_open.set(false); };
-        auto root = view(std::move(scrim));
+    if (!app.layer_popup_open.get()) return;
+    const auto [cx, cy] = host.last_click_pos();
+    Props root_p;
+    root_p.direction = Direction::column;
+    root_p.on_click = [&app] { app.layer_popup_open.set(false); };
+    auto root = view(std::move(root_p));
 
-        Props card_p;
-        card_p.background = pal.surface;
-        card_p.radius = static_cast<float>(tokens::radius_lg);
-        card_p.width = 360.0f;
-        card_p.direction = Direction::column;
-        card_p.gap = static_cast<float>(tokens::spacing_md);
-        card_p.padding = pad_all(static_cast<float>(tokens::spacing_lg));
-        card_p.shadow_elevation = 3;
-        auto card = view(std::move(card_p));
+    Props gap_p;
+    gap_p.height = cy + 4.0f;
+    root->children.push_back(view(std::move(gap_p)));
 
-        Props title_p;
-        title_p.text = L"A real modal";
-        title_p.text_color = pal.text;
-        title_p.font_size_pt = tokens::font_title;
-        title_p.text_align = Align::start;
-        card->children.push_back(label(title_p.text, title_p));
+    Props row_p;
+    row_p.direction = Direction::row;
+    auto row = view(std::move(row_p));
+    Props indent_p;
+    indent_p.width = cx;
+    row->children.push_back(view(std::move(indent_p)));
 
-        Props body_p;
-        body_p.text = L"Scrim blocks the page, Esc / clicking outside closes.";
-        body_p.text_color = pal.text_secondary;
-        body_p.font_size_pt = tokens::font_body;
-        body_p.text_align = Align::start;
-        card->children.push_back(label(body_p.text, body_p));
-
-        card->children.push_back(button(L"Close",
-            [&app] { app.layer_modal_open.set(false); }, button_primary(pal)));
-
-        root->children.push_back(std::move(card));
-        host.overlay(std::move(root));
+    Props menu_p;
+    menu_p.background = pal.surface;
+    menu_p.border_color = pal.border;
+    menu_p.border_width = 1.0f;
+    menu_p.radius = static_cast<float>(tokens::radius_md);
+    menu_p.direction = Direction::column;
+    menu_p.padding = pad_all(static_cast<float>(tokens::spacing_sm));
+    menu_p.shadow_elevation = 2;
+    auto menu = view(std::move(menu_p));
+    const wchar_t* items[] = {L"Cut", L"Copy", L"Paste", L"— divider —"};
+    for (const wchar_t* it : items) {
+        Props ip;
+        ip.text = it;
+        ip.text_color = pal.text;
+        ip.font_size_pt = tokens::font_body;
+        ip.text_align = Align::start;
+        ip.height = 26.0f;
+        menu->children.push_back(label(it, std::move(ip)));
     }
-
-    // 2) Anchored popup below the last click point (transparent root =
-    //    click-through outside the menu; click closes via root on_click).
-    if (app.layer_popup_open.get()) {
-        const auto [cx, cy] = host.last_click_pos();
-        Props root_p;
-        root_p.direction = Direction::column;
-        root_p.on_click = [&app] { app.layer_popup_open.set(false); };
-        auto root = view(std::move(root_p));
-
-        Props gap_p;
-        gap_p.height = cy + 4.0f;
-        root->children.push_back(view(std::move(gap_p)));
-
-        Props row_p;
-        row_p.direction = Direction::row;
-        auto row = view(std::move(row_p));
-        Props indent_p;
-        indent_p.width = cx;
-        row->children.push_back(view(std::move(indent_p)));
-
-        Props menu_p;
-        menu_p.background = pal.surface;
-        menu_p.border_color = pal.border;
-        menu_p.border_width = 1.0f;
-        menu_p.radius = static_cast<float>(tokens::radius_md);
-        menu_p.direction = Direction::column;
-        menu_p.padding = pad_all(static_cast<float>(tokens::spacing_sm));
-        menu_p.shadow_elevation = 2;
-        auto menu = view(std::move(menu_p));
-        const wchar_t* items[] = {L"Cut", L"Copy", L"Paste", L"— divider —"};
-        for (const wchar_t* it : items) {
-            Props ip;
-            ip.text = it;
-            ip.text_color = pal.text;
-            ip.font_size_pt = tokens::font_body;
-            ip.text_align = Align::start;
-            ip.height = 26.0f;
-            menu->children.push_back(label(ip.text, ip));
-        }
-        row->children.push_back(std::move(menu));
-        root->children.push_back(std::move(row));
-        host.overlay(std::move(root));
-    }
-
-    // 3) Corner toasts: drop expired entries, keep the clock armed until
-    //    the next deadline, show the rest bottom-right.
-    const unsigned long long now = GetTickCount64();
-    unsigned long long next_deadline = 0;
-    size_t w = 0;
-    for (size_t i = 0; i < app.layer_toasts.size(); ++i) {
-        if (app.layer_toasts[i].deadline_ms > now) {
-            app.layer_toasts[w++] = app.layer_toasts[i];
-            if (next_deadline == 0 || app.layer_toasts[i].deadline_ms < next_deadline)
-                next_deadline = app.layer_toasts[i].deadline_ms;
-        }
-    }
-    if (w < app.layer_toasts.size()) {
-        app.layer_toasts.resize(w);
-        host.request_render();
-    }
-    if (next_deadline != 0) {
-        host.animate_for(static_cast<unsigned>(next_deadline - now) + 2u);
-    }
-    if (!app.layer_toasts.empty()) {
-        Props root_p;
-        root_p.direction = Direction::column;
-        root_p.justify = Justify::end;
-        root_p.align = Align::end;
-        root_p.gap = static_cast<float>(tokens::spacing_sm);
-        root_p.padding = pad_all(static_cast<float>(tokens::spacing_lg));
-        auto root = view(std::move(root_p));
-        for (const auto& t : app.layer_toasts) {
-            Props tp;
-            tp.background = pal.surface;
-            tp.border_color = pal.border;
-            tp.border_width = 1.0f;
-            tp.radius = static_cast<float>(tokens::radius_md);
-            tp.padding = EdgeInsets{10.0f, 10.0f, 10.0f, 10.0f};
-            tp.text = t.text;
-            tp.text_color = pal.text;
-            tp.font_size_pt = tokens::font_caption;
-            tp.text_align = Align::start;
-            tp.shadow_elevation = 2;
-            root->children.push_back(label(tp.text, tp));
-        }
-        host.overlay(std::move(root));
-    }
+    row->children.push_back(std::move(menu));
+    root->children.push_back(std::move(row));
+    host.overlay(std::move(root));
 }
 
 // ---- Root ------------------------------------------------------------------
@@ -2535,12 +1931,11 @@ void declare_layer_overlays(App& app) {
 // four tab labels read as the "section navigation" for the body below.
 ElementPtr tab_bar(App& app) {
     const Palette& pal = app.host.palette();
-    auto bar = segmented_control(pal,
+    return ui::segmented(pal,
         {L"Form controls", L"Pickers", L"Patterns", L"Overlays",
          L"Data viz", L"Mini-apps", L"Motion", L"Scroll"},
         app.gallery_tab.get(),
         [&app](int i) { app.gallery_tab.set(i); });
-    return bar;
 }
 
 // ---- Phase F: Data viz (Calendar / Bar chart / Avatar group / Breadcrumb) --
@@ -3293,31 +2688,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.inbox_selected     = app.host.make_state<int>(1);
     app.media_playing      = app.host.make_state<bool>(false);
     app.media_volume       = app.host.make_state<float>(60.0f);
-    app.toasts             = app.host.make_state<std::vector<ToastEntry>>({
-        {0, L"New message in your inbox.",    L"info"},
-        {1, L"Profile saved.",                 L"success"},
-        {2, L"Storage almost full.",           L"warning"},
-        {3, L"Failed to delete file.",         L"danger"},
-    });
-    app.next_toast_id      = 4;
-    app.modal_open         = app.host.make_state<bool>(false);
-    app.tooltip_visible    = app.host.make_state<bool>(false);
-    app.tooltip_hint       = app.host.make_state<std::wstring>(L"");
     app.cal_year     = app.host.make_state<int>(2026);
     app.cal_month    = app.host.make_state<int>(7);     // August (0-indexed)
     app.cal_selected = app.host.make_state<int>(14);
     app.gallery_tab  = app.host.make_state<int>(initial_tab);
-    app.layer_modal_open = app.host.make_state<bool>(false);
     app.layer_popup_open = app.host.make_state<bool>(false);
     app.host.set_root_builder([&app] { return build(app); });
 
-    // Screenshot-driven verification seeds (Round 2, temporary): a trailing
-    // "seed" argument pre-opens the layer demos so no synthetic input is
-    // needed to capture them.
+    // Screenshot-driven verification seed: a trailing "seed" argument
+    // pre-opens the modal + toast so captures need no synthetic input.
     if (cmd_line != nullptr && wcsstr(cmd_line, L"seed") != nullptr) {
-        app.layer_toasts.push_back({GetTickCount64() + 60000,
-                                    L"Startup toast — seeded"});
-        app.layer_modal_open.set(true);
+        ui::toast_show(app.toast_host, ui::ToastKind::info, L"Startup toast — seeded");
+        app.toast_host.entries.back().deadline_ms = GetTickCount64() + 60000;
+        Props body_p;
+        body_p.text = L"Scrim blocks the page, Esc / clicking outside closes.";
+        body_p.text_color = app.host.palette().text;
+        body_p.font_size_pt = tokens::font_body;
+        body_p.text_align = Align::start;
+        ui::modal_show(app.modal_host, L"A real modal",
+                       label(body_p.text, body_p), [] {});
     }
 
     Host::Config cfg;

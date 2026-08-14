@@ -407,6 +407,73 @@ void Host::handle_mouse_wheel(int delta, int px, int py) noexcept {
     }
 }
 
+void Host::update_tooltip() noexcept {
+    // Tooltip is armed when the hovered element (or its nearest annotated
+    // ancestor) has a tooltip_text and the pointer has dwelled since the
+    // last hover change for motion_slow_ms.
+    std::wstring text;
+    for (Path walk = hover_path_; !walk.empty(); walk.pop_back()) {
+        if (const Element* e = resolve(walk);
+            e != nullptr && !e->props.tooltip_text.empty()) {
+            text = e->props.tooltip_text;
+            break;
+        }
+    }
+    if (text.empty()) return;
+
+    const unsigned long long now = GetTickCount64();
+    const unsigned long long dwell =
+        static_cast<unsigned long long>(tokens::motion_slow_ms);
+    const unsigned long long elapsed = now - hover_change_ms_;
+    if (elapsed < dwell) {
+        // Not armed yet: schedule the re-check for the moment the dwell
+        // completes (otherwise no later paint would ever show the tip).
+        animate_for(static_cast<unsigned>(dwell - elapsed) + 2u);
+        return;
+    }
+    // Armed: the card follows the cursor, so keep frames coming while the
+    // pointer keeps moving inside the same hover target.
+    animate_for(64);
+    frame_overlays_.push_back(build_tooltip(text));
+}
+
+ElementPtr Host::build_tooltip(const std::wstring& text) const noexcept {
+    // Transparent root (no background => click-through) anchored at the
+    // cursor: spacer(h = y + 16) + row{spacer(w = x + 12), card}.
+    const float anchor_y = last_mouse_ly_ + 16.0f;
+    const float anchor_x = last_mouse_lx_ + 12.0f;
+
+    Props root_p;
+    root_p.direction = Direction::column;
+    auto root = view(std::move(root_p));
+
+    Props gap_p;
+    gap_p.height = anchor_y;
+    root->children.push_back(view(std::move(gap_p)));
+
+    Props row_p;
+    row_p.direction = Direction::row;
+    auto row = view(std::move(row_p));
+    Props indent_p;
+    indent_p.width = anchor_x;
+    row->children.push_back(view(std::move(indent_p)));
+
+    Props card_p;
+    card_p.background = shown_.surface;
+    card_p.border_color = shown_.border;
+    card_p.border_width = 1.0f;
+    card_p.radius = static_cast<float>(tokens::radius_md);
+    card_p.padding = EdgeInsets{6.0f, 8.0f, 6.0f, 8.0f};
+    card_p.shadow_elevation = 2;
+    card_p.text_color = shown_.text_secondary;
+    card_p.font_size_pt = tokens::font_caption;
+    card_p.text_align = Align::start;
+    row->children.push_back(label(text, std::move(card_p)));
+
+    root->children.push_back(std::move(row));
+    return root;
+}
+
 void Host::handle_timer() noexcept {
     const unsigned long long now = GetTickCount64();
     if (fading_) {
@@ -949,6 +1016,9 @@ void Host::paint_frame() noexcept {
         std::map<Path, ScrollState> next_scrolls;
         layout_scroll_views(*tree_, Path{}, ctx, next_scrolls);
         scrolls_ = std::move(next_scrolls);
+        // Host-native tooltip may append one more pass-through overlay
+        // (armed by dwelling hover); it lays out with the rest below.
+        update_tooltip();
         // Overlays lay out against the full canvas (anchoring is pure
         // flex — see test_overlay_anchoring). They are collected inside
         // root_builder_(), which ran above.

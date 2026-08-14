@@ -627,6 +627,9 @@ void test_damage() {
         v = base; v.props.cursor = Cursor::hand;
         expect(DamageTracker::paint_props_equal(base.props, v.props),
                "cursor is NOT paint-dirty");
+        v = base; v.props.tooltip_text = L"hint";
+        expect(DamageTracker::paint_props_equal(base.props, v.props),
+               "tooltip_text is NOT paint-dirty");
     }
 
     // Three distinct interaction changes (hover + press + focus all move)

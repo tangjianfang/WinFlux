@@ -96,6 +96,10 @@ struct Props {
     bool focusable = false;
     bool enabled = true;
     Cursor cursor = Cursor::arrow;
+    // Host-native hover hint: after the pointer dwells on this element for
+    // motion_slow_ms, the Host shows a small overlay card near the cursor.
+    // Interaction-time only — deliberately NOT part of the paint diff.
+    std::wstring tooltip_text;
 
     // Typed-element payloads
     std::optional<bool> checked;   // present => checkbox glyph rendering

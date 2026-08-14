@@ -233,6 +233,11 @@ private:
     // Logical position of the last completed click (anchored popups).
     float last_click_lx_ = 0.0f;
     float last_click_ly_ = 0.0f;
+    // Host-native tooltip: armed when the hovered element carries a
+    // tooltip_text and the pointer has dwelled for motion_slow_ms. Built
+    // as an extra pass-through overlay after the builder's own overlays.
+    void update_tooltip() noexcept;
+    [[nodiscard]] ElementPtr build_tooltip(const std::wstring& text) const noexcept;
     // Unified animation-clock deadline (animate_for). The WM_TIMER stays
     // armed while now < deadline or a theme fade is running.
     unsigned long long anim_deadline_ms_ = 0;
