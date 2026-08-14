@@ -67,8 +67,13 @@ struct App {
     // holds a small enough set to fit a 1000-px-tall window.
     //   0 = Form controls, 1 = Pickers, 2 = Patterns, 3 = Overlays,
     //   4 = Data viz (Phase F calendar / chart / avatars),
-    //   5 = Mini-apps (Phase D)
+    //   5 = Mini-apps (Phase D), 6 = Motion (Round 1 visual foundation)
     State<int> gallery_tab;
+    // Round 1 motion demo state. No bind needed — builders read these via
+    // host.animate() every frame, which also keeps the clock armed while a
+    // tween is in flight.
+    Animated<float> anim_progress{0.0f};
+    Animated<Color> anim_color{rgb(59, 130, 246)};
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -2172,6 +2177,147 @@ ElementPtr footer(App& app) {
                  std::move(p));
 }
 
+// ---- Round 1: Motion & Effects --------------------------------------------
+//
+// Exercises everything the visual-foundation round added: Animated<T>
+// tweens (progress + colour), gradients, elevation 1-3 shadows, the full
+// 24-icon set, and the per-element cursors.
+
+ElementPtr motion_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    // 1) Tween demo — one Animated<float> drives the progress bar, the %
+    // readout, and (through a second Animated<Color>) a colour swatch.
+    constexpr unsigned kTweenMs =
+        static_cast<unsigned>(tokens::motion_slow_ms) * 3;   // 840 ms
+    const float v = app.host.animate(app.anim_progress);
+    const Color swatch = app.host.animate(app.anim_color);
+
+    auto tween_col = col_view({
+        row_view({
+            button(L"Fill", [&app] {
+                const Palette& p = app.host.palette();
+                app.anim_progress.set(1.0f, kTweenMs, Curve::ease_in_out);
+                app.anim_color.set(p.success, kTweenMs, Curve::ease_in_out);
+            }, button_primary(pal)),
+            button(L"Drain", [&app] {
+                const Palette& p = app.host.palette();
+                app.anim_progress.set(0.0f, kTweenMs, Curve::ease_in_out);
+                app.anim_color.set(p.accent, kTweenMs, Curve::ease_in_out);
+            }, button_secondary(pal)),
+        }, static_cast<float>(tokens::spacing_sm), Align::start),
+        [&] {
+            Props p;
+            p.height = static_cast<float>(tokens::progress_height);
+            p.width = 320.0f;
+            return progress(v, std::move(p));
+        }(),
+        [&] {
+            Props p;
+            p.text = std::to_wstring(static_cast<int>(v * 100.0f)) + L"% · " +
+                     L"ease_in_out 840 ms";
+            p.text_color = pal.text_secondary;
+            p.font_size_pt = tokens::font_caption;
+            p.text_align = Align::start;
+            return label(p.text, std::move(p));
+        }(),
+        [&] {
+            // Colour tween target card.
+            Props p;
+            p.background = swatch;
+            p.radius = static_cast<float>(tokens::radius_md);
+            p.width = 320.0f;
+            p.height = 24.0f;
+            return view(std::move(p));
+        }(),
+    }, static_cast<float>(tokens::spacing_sm));
+
+    // 2) Gradient + elevation cards.
+    auto elevation_card = [&](const wchar_t* caption, int elevation,
+                              std::optional<Gradient> gradient) {
+        Props p;
+        p.radius = static_cast<float>(tokens::radius_card);
+        p.width = 150.0f;
+        p.height = 56.0f;
+        p.shadow_elevation = elevation;
+        p.text = caption;
+        p.text_color = pal.text;
+        p.font_size_pt = tokens::font_caption;
+        if (gradient.has_value()) {
+            p.background_gradient = gradient;
+            p.text_color = pal.on_accent;
+        } else {
+            p.background = pal.surface;
+        }
+        return label(p.text, std::move(p));
+    };
+    auto elev_row = row_view({
+        elevation_card(L"elevation 1", 1, std::nullopt),
+        elevation_card(L"elevation 2", 2, std::nullopt),
+        elevation_card(L"elevation 3", 3, std::nullopt),
+        elevation_card(L"gradient e2", 2, Gradient{pal.accent, pal.info}),
+    }, static_cast<float>(tokens::spacing_md), Align::start);
+
+    // 3) Icon grid — all 24 IconKind values, 6 per row.
+    constexpr IconKind kAll[] = {
+        IconKind::chevron_down, IconKind::chevron_up, IconKind::chevron_left,
+        IconKind::chevron_right, IconKind::close, IconKind::check,
+        IconKind::search, IconKind::plus, IconKind::minus, IconKind::hamburger,
+        IconKind::user, IconKind::trash, IconKind::edit, IconKind::arrow_right,
+        IconKind::calendar, IconKind::inbox, IconKind::play, IconKind::pause,
+        IconKind::skip_prev, IconKind::skip_next, IconKind::info,
+        IconKind::success, IconKind::warning, IconKind::danger,
+    };
+    constexpr int kPerRow = 6;
+    constexpr int kCount = static_cast<int>(std::size(kAll));
+    auto icon_grid = view();
+    for (int r = 0; r < (kCount + kPerRow - 1) / kPerRow; ++r) {
+        auto row = view();
+        for (int c = 0; c < kPerRow; ++c) {
+            const int idx = r * kPerRow + c;
+            if (idx >= kCount) break;
+            Props ip;
+            ip.text_color = pal.text_secondary;
+            ip.hover_background = pal.surface_hover;
+            ip.radius = static_cast<float>(tokens::radius_md);
+            row->children.push_back(icon(kAll[idx], std::move(ip)));
+        }
+        row->props.direction = Direction::row;
+        row->props.gap = static_cast<float>(tokens::spacing_md);
+        icon_grid->children.push_back(std::move(row));
+    }
+    icon_grid->props.direction = Direction::column;
+    icon_grid->props.gap = static_cast<float>(tokens::spacing_sm);
+
+    // 4) Cursor sampler — buttons already show the hand; these opt into
+    // the rarer shapes.
+    auto cursor_row = row_view({
+        [&] {
+            Props p = button_secondary(pal);
+            p.cursor = Cursor::cross;
+            return button(L"cross", [] {}, std::move(p));
+        }(),
+        [&] {
+            Props p = button_secondary(pal);
+            p.cursor = Cursor::size_ns;
+            return button(L"resize ns", [] {}, std::move(p));
+        }(),
+        [&] {
+            Props p = button_secondary(pal);
+            p.cursor = Cursor::ibeam;
+            return button(L"ibeam", [] {}, std::move(p));
+        }(),
+    }, static_cast<float>(tokens::spacing_sm), Align::start);
+
+    auto body = col_view({
+        std::move(tween_col),
+        std::move(elev_row),
+        std::move(icon_grid),
+        std::move(cursor_row),
+    }, static_cast<float>(tokens::spacing_md));
+    return section_card(L"Motion & Effects", std::move(body), pal);
+}
+
 // ---- Root ------------------------------------------------------------------
 
 // Top-level category tab bar. A thin wrapper over segmented_control so the
@@ -2180,10 +2326,9 @@ ElementPtr tab_bar(App& app) {
     const Palette& pal = app.host.palette();
     auto bar = segmented_control(pal,
         {L"Form controls", L"Pickers", L"Patterns", L"Overlays",
-         L"Data viz", L"Mini-apps"},
+         L"Data viz", L"Mini-apps", L"Motion"},
         app.gallery_tab.get(),
         [&app](int i) { app.gallery_tab.set(i); });
-    return bar;
     return bar;
 }
 
@@ -2816,7 +2961,6 @@ ElementPtr build_body(App& app) {
         }
         return body;
     case 5:   // Mini-apps — Settings, Inbox, Media Player
-    default:
         left_col = mk_col({
             settings_section(app),
             inbox_section(app),
@@ -2824,6 +2968,18 @@ ElementPtr build_body(App& app) {
         right_col = mk_col({
             media_player_section(app),
         });
+        break;
+    case 6:   // Motion — tweens / gradients / shadows / icons / cursors
+        left_col = mk_col({});
+        right_col = mk_col({});
+        body->children.clear();
+        {
+            auto mv = motion_section(app);
+            mv->props.flex_grow = 1.0f;
+            body->children.push_back(std::move(mv));
+        }
+        return body;
+    default:
         break;
     }
     body->children.push_back(std::move(left_col));
@@ -2855,8 +3011,21 @@ ElementPtr build(App& app) {
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     enable_per_monitor_dpi_v2();
+
+    // Optional initial gallery tab from the command line (e.g.
+    // `WinFluxGallery.exe 6` opens on Motion). Falls back to Form controls
+    // for any non-numeric / out-of-range argument.
+    int initial_tab = 0;
+    if (cmd_line != nullptr && *cmd_line != L'\0') {
+        try {
+            const int parsed = std::wcstol(cmd_line, nullptr, 10);
+            if (parsed >= 0 && parsed <= 6) initial_tab = parsed;
+        } catch (...) {
+            initial_tab = 0;
+        }
+    }
 
     // Query the work area (excludes the taskbar + docked app bars). The
     // Gallery originally hard-coded 1200x1100, which overflowed the screen
@@ -2914,7 +3083,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.cal_year     = app.host.make_state<int>(2026);
     app.cal_month    = app.host.make_state<int>(7);     // August (0-indexed)
     app.cal_selected = app.host.make_state<int>(14);
-    app.gallery_tab  = app.host.make_state<int>(0);
+    app.gallery_tab  = app.host.make_state<int>(initial_tab);
     app.host.set_root_builder([&app] { return build(app); });
 
     Host::Config cfg;
