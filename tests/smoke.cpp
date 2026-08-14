@@ -83,6 +83,60 @@ void test_theme() {
     expect(near_eq(tokens::shadow_offset_y, 2.0f), "shadow_offset_y == 2.0");
 }
 
+void test_animation() {
+    // Curves: endpoints exact, clamped, front/back-loaded as designed.
+    expect(near_eq(apply_curve(0.0f, Curve::linear), 0.0f) &&
+           near_eq(apply_curve(1.0f, Curve::linear), 1.0f), "curve linear endpoints");
+    expect(near_eq(apply_curve(0.0f, Curve::ease_in_out), 0.0f) &&
+           near_eq(apply_curve(1.0f, Curve::ease_in_out), 1.0f),
+           "curve ease_in_out endpoints");
+    expect(near_eq(apply_curve(0.5f, Curve::ease_in_out), 0.5f),
+           "ease_in_out symmetric midpoint");
+    expect(apply_curve(0.25f, Curve::ease_out) > 0.25f, "ease_out front-loads");
+    expect(near_eq(apply_curve(2.0f, Curve::ease_out), 1.0f), "curve clamps t > 1");
+    expect(near_eq(apply_curve(-1.0f, Curve::ease_in_out), 0.0f), "curve clamps t < 0");
+
+    // approach_blend: steady states snap, ramps go the right way.
+    expect(near_eq(approach_blend(true, true, 1000, 0, 100), 1.0f), "blend steady-on");
+    expect(near_eq(approach_blend(false, false, 1000, 0, 100), 0.0f), "blend steady-off");
+    expect(near_eq(approach_blend(true, false, 50, 0, 100), 0.5f), "blend ramping in");
+    expect(near_eq(approach_blend(false, true, 50, 0, 100), 0.5f), "blend ramping out");
+    expect(near_eq(approach_blend(true, false, 500, 0, 100), 1.0f), "blend clamped past end");
+
+    // Animated<float> with an injected clock (no real timer involved).
+    Animated<float> a{0.0f};
+    a.set_at(1.0f, 100, Curve::linear, 0);
+    expect(a.active_at(0) && a.active_at(99) && !a.active_at(100),
+           "active window is half-open [start, start+dur)");
+    expect(near_eq(a.current_at(0), 0.0f), "tween starts at from");
+    expect(near_eq(a.current_at(50), 0.5f), "linear midpoint");
+    expect(near_eq(a.current_at(100), 1.0f) && near_eq(a.current_at(500), 1.0f),
+           "tween settles at to and stays");
+    expect(a.remaining_at(25) == 75 && a.remaining_at(500) == 0, "remaining math");
+
+    // Retarget mid-flight continues from the current visual value.
+    a.set_at(0.5f, 100, Curve::linear, 50);   // visual value at t=50 was 0.5
+    expect(near_eq(a.current_at(50), 0.5f), "retarget starts from visual value");
+    expect(near_eq(a.target(), 0.5f), "target tracks latest set");
+
+    // duration 0 or same-value set snaps (no tween).
+    Animated<float> b{2.0f};
+    b.set_at(9.0f, 0, Curve::ease_in_out, 0);
+    expect(!b.active_at(0) && near_eq(b.current_at(0), 9.0f), "zero-duration snaps");
+    b.set_at(9.0f, 500, Curve::linear, 0);
+    expect(!b.active_at(0), "same-value set is a no-op tween");
+
+    // Animated<Color> interpolates per channel.
+    Animated<Color> c{rgb(0, 0, 0)};
+    c.set_at(rgb(200, 100, 50), 100, Curve::linear, 0);
+    expect(c.current_at(50) == rgb(100, 50, 25), "Animated<Color> channel lerp");
+
+    // Animated<int> rounds to nearest.
+    Animated<int> n{0};
+    n.set_at(10, 100, Curve::linear, 0);
+    expect(n.current_at(50) == 5 && n.current_at(75) == 8, "Animated<int> rounds");
+}
+
 void test_builders() {
     const ElementPtr b = button(L"OK", nullptr);
     expect(b->type == L"button", "button builder sets type");
@@ -329,6 +383,7 @@ void test_damage() {
 
 int main() {
     test_theme();
+    test_animation();
     test_builders();
     test_layout_row_grow();
     test_layout_column_center();

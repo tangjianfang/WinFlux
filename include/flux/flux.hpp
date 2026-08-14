@@ -8,6 +8,7 @@
 
 #include "Theme.hpp"
 #include "Element.hpp"
+#include "Animation.hpp"
 #include "FlexLayout.hpp"
 #include "D2DRenderer.hpp"
 #include "Host.hpp"
