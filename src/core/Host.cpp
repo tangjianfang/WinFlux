@@ -317,6 +317,12 @@ void Host::set_root_builder(std::function<ElementPtr()> builder) noexcept {
     request_render();
 }
 
+void Host::overlay(ElementPtr root) noexcept {
+    // Only meaningful while the builder runs (paint_frame clears the set
+    // before invoking it); a stray call outside a frame is dropped.
+    if (painting_ && root != nullptr) frame_overlays_.push_back(std::move(root));
+}
+
 void Host::request_render() noexcept {
     // Bump BEFORE the painting_ guard so a state mutation fired from inside
     // a click handler (which runs with painting_ == true and would otherwise
@@ -388,7 +394,7 @@ void Host::handle_mouse_wheel(int delta, int px, int py) noexcept {
     const float lx = to_logical_px(px);
     const float ly = to_logical_px(py);
     Path path;
-    (void)hit_test(lx, ly, path);
+    (void)hit_test_all(lx, ly, path);
     // Nearest scrollable ancestor of the point wins.
     for (Path walk = path; !walk.empty(); walk.pop_back()) {
         const auto it = scrolls_.find(walk);
@@ -468,7 +474,7 @@ bool Host::rects_intersect(const Rect& a, const Rect& b) noexcept {
 void Host::update_cursor() noexcept {
     if (tree_ == nullptr) return;
     Path path;
-    (void)hit_test(last_mouse_lx_, last_mouse_ly_, path);
+    (void)hit_test_all(last_mouse_lx_, last_mouse_ly_, path);
     Cursor want = Cursor::arrow;
     // Nearest annotated ancestor wins (a label inside a button shows the
     // button's cursor).
@@ -515,6 +521,19 @@ const Element* Host::hit_test(float lx, float ly, Path& path) const noexcept {
 }
 
 const Element* Host::resolve(const Path& path) const noexcept {
+    // {-1, overlay_index, ...} addresses an element inside the i-th overlay.
+    if (!path.empty() && path[0] == -1) {
+        if (path.size() < 2) return nullptr;
+        const size_t idx = static_cast<size_t>(path[1]);
+        if (idx >= frame_overlays_.size()) return nullptr;
+        const Element* node = frame_overlays_[idx].get();
+        for (size_t i = 2; i < path.size(); ++i) {
+            const int index = path[i];
+            if (index < 0 || static_cast<size_t>(index) >= node->children.size()) return nullptr;
+            node = node->children[static_cast<size_t>(index)].get();
+        }
+        return node;
+    }
     if (tree_ == nullptr) return nullptr;
     const Element* node = tree_.get();
     for (const int index : path) {
@@ -522,6 +541,45 @@ const Element* Host::resolve(const Path& path) const noexcept {
         node = node->children[static_cast<size_t>(index)].get();
     }
     return node;
+}
+
+const Element* Host::hit_test_all(float lx, float ly, Path& path) const noexcept {
+    // Overlays first, topmost (last shown) first. A root with a background
+    // is a scrim: it swallows hits that miss every child; a transparent
+    // root is click-through outside its children.
+    for (size_t oi = frame_overlays_.size(); oi-- > 0;) {
+        const Element& root = *frame_overlays_[oi];
+        if (!contains(root, lx, ly)) continue;
+        Path inner;
+        const Element* node = &root;
+        bool descended = false;
+        while (true) {
+            const Element* next = nullptr;
+            for (int i = static_cast<int>(node->children.size()) - 1; i >= 0; --i) {
+                const Element& c = *node->children[static_cast<size_t>(i)];
+                if (contains(c, lx, ly)) {
+                    next = &c;
+                    inner.push_back(i);
+                    break;
+                }
+            }
+            if (next == nullptr) break;
+            node = next;
+            descended = true;
+        }
+        if (descended) {
+            path.clear();
+            path.push_back(-1);
+            path.push_back(static_cast<int>(oi));
+            path.insert(path.end(), inner.begin(), inner.end());
+            return node;
+        }
+        if (root.props.background.has_value()) {
+            path = Path{-1, static_cast<int>(oi)};
+            return &root;
+        }
+    }
+    return hit_test(lx, ly, path);
 }
 
 void Host::collect_focusable(const Element& e, const Path& prefix, std::vector<Path>& out) const noexcept {
@@ -566,7 +624,7 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     }
 
     Path path;
-    (void)hit_test(lx, ly, path);
+    (void)hit_test_all(lx, ly, path);
 
     // Drag-while-pressed: if the user pressed a slider and is still holding
     // the button, mouse_move translates the thumb. pressed_path_ resolves to
@@ -605,7 +663,7 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
     const float lx = to_logical_px(px);
     const float ly = to_logical_px(py);
     Path path;
-    const Element* target = hit_test(lx, ly, path);
+    const Element* target = hit_test_all(lx, ly, path);
 
     // Scrollbar thumb/track interaction takes precedence over content hits.
     if (target != nullptr) {
@@ -698,7 +756,7 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
     if (pressed_path_.empty()) return;
 
     Path under;
-    (void)hit_test(to_logical_px(px), to_logical_px(py), under);
+    (void)hit_test_all(to_logical_px(px), to_logical_px(py), under);
     // Walk up from the release point and check whether the pressed element is
     // still an ancestor — that's the Win32 click semantics.
     Path walk = under;
@@ -732,6 +790,16 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
 
 void Host::handle_key_down(WPARAM vk) noexcept {
     if (tree_ == nullptr) return;
+
+    // Esc closes the topmost overlay: its root's on_click is the dismiss
+    // semantics (scrim click and Esc share one handler).
+    if (vk == VK_ESCAPE && !frame_overlays_.empty()) {
+        const Element* top = frame_overlays_.back().get();
+        if (top != nullptr && top->props.on_click && top->props.enabled) {
+            top->props.on_click();
+        }
+        return;
+    }
 
     // VK_BACK on a focused text_input deletes the trailing character. We do
     // this in WM_KEYDOWN because VK_BACK does not generate a WM_CHAR message.
@@ -768,6 +836,10 @@ void Host::handle_key_down(WPARAM vk) noexcept {
 
     std::vector<Path> order;
     collect_focusable(*tree_, Path{}, order);
+    for (size_t oi = 0; oi < frame_overlays_.size(); ++oi) {
+        collect_focusable(*frame_overlays_[oi],
+                          Path{-1, static_cast<int>(oi)}, order);
+    }
     if (order.empty()) return;
 
     if (vk == VK_TAB) {
@@ -827,6 +899,10 @@ void Host::paint_frame() noexcept {
     }
     PaintScope scope(painting_);
 
+    // Reset the overlay set before the build: the root builder re-declares
+    // every visible overlay each frame (declarative lifetime).
+    frame_overlays_.clear();
+
 #ifdef _DEBUG
     if (qpc_freq_ == 0) {
         LARGE_INTEGER f{};
@@ -874,6 +950,12 @@ void Host::paint_frame() noexcept {
         std::map<Path, ScrollState> next_scrolls;
         layout_scroll_views(*tree_, Path{}, ctx, next_scrolls);
         scrolls_ = std::move(next_scrolls);
+        // Overlays lay out against the full canvas (anchoring is pure
+        // flex — see test_overlay_anchoring). They are collected inside
+        // root_builder_(), which ran above.
+        for (auto& ov : frame_overlays_) {
+            if (ov != nullptr) flex_layout(*ov, logical_w, logical_h, ctx);
+        }
     }
 
 #ifdef _DEBUG
@@ -889,8 +971,20 @@ void Host::paint_frame() noexcept {
     DamageTracker::InteractionState next_interaction{
         hover_path_, pressed_path_, focus_path_};
 
+    // Interaction state that points into an overlay can't be resolved
+    // against the main tree by the damage diff — force full for that frame.
+    // (Overlay set changes likewise: scrim appears/disappears everywhere.)
+    const auto touches_overlay = [](const Path& p) noexcept {
+        return !p.empty() && p[0] == -1;
+    };
+    const bool overlay_interaction = touches_overlay(hover_path_) ||
+        touches_overlay(pressed_path_) || touches_overlay(focus_path_) ||
+        touches_overlay(prev_hover_path_) || touches_overlay(prev_pressed_path_) ||
+        touches_overlay(prev_focus_path_);
+    const bool overlay_set_changed = frame_overlays_.size() != prev_overlays_.size();
+
     std::vector<Rect> dirty_rects;
-    if (force_full_dirty_ || animating()) {
+    if (force_full_dirty_ || animating() || overlay_set_changed || overlay_interaction) {
         if (logical_w > 0.0f && logical_h > 0.0f) {
             dirty_rects.push_back(Rect{0.0f, 0.0f, logical_w, logical_h});
         }
@@ -899,6 +993,15 @@ void Host::paint_frame() noexcept {
                                               logical_w, logical_h,
                                               &prev_interaction,
                                               &next_interaction);
+        for (size_t oi = 0; oi < frame_overlays_.size(); ++oi) {
+            auto rects = damage_tracker_.compute(prev_overlays_[oi].get(),
+                                                 frame_overlays_[oi].get(),
+                                                 logical_w, logical_h);
+            dirty_rects.insert(dirty_rects.end(), rects.begin(), rects.end());
+        }
+        if (dirty_rects.size() > damage_tracker_.max_rects * 2) {
+            dirty_rects.assign(1, Rect{0.0f, 0.0f, logical_w, logical_h});
+        }
     }
     force_full_dirty_ = false;
 
@@ -930,12 +1033,19 @@ void Host::paint_frame() noexcept {
     for (const Rect& dr : dirty_rects) {
         renderer_.begin(shown_.background, &dr);
         if (tree_ != nullptr) render_element(*tree_, Path{}, dr);
+        for (size_t oi = 0; oi < frame_overlays_.size(); ++oi) {
+            if (frame_overlays_[oi] != nullptr) {
+                render_element(*frame_overlays_[oi],
+                               Path{-1, static_cast<int>(oi)}, dr);
+            }
+        }
         renderer_.end();
     }
 
     // Snapshots advance AFTER a real draw, so a frame that produced no dirty
     // rects preserves the true previous baseline for the next diff.
     prev_tree_ = tree_;
+    prev_overlays_ = frame_overlays_;
     prev_hover_path_   = hover_path_;
     prev_pressed_path_ = pressed_path_;
     prev_focus_path_   = focus_path_;

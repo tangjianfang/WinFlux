@@ -70,6 +70,15 @@ public:
     void set_root_builder(std::function<ElementPtr()> builder) noexcept;
     void request_render() noexcept;
 
+    // Declarative overlay channel. Call from the root builder for each
+    // overlay visible THIS frame (the set resets on every paint_frame).
+    // Overlay roots are laid out against the full canvas, drawn on top of
+    // the main tree, and hit-tested first (later entries on top). A root
+    // with a background colour acts as a scrim: it blocks hits to layers
+    // below and its on_click is the Esc/close semantics. Roots without a
+    // background are click-through where no child is hit.
+    void overlay(ElementPtr root) noexcept;
+
     // Keep the animation clock ticking for `ms` more milliseconds. Safe to
     // call from builders (runs inside paint_frame): it only arms a timer;
     // the ticks call request_render, which re-enters cleanly.
@@ -116,6 +125,15 @@ private:
     void layout_scroll_views(Element& e, const Path& prefix, const LayoutContext& ctx,
                              std::map<Path, ScrollState>& next) noexcept;
     void draw_scrollbar(const Element& e, const Path& path, unsigned long long now_ms) noexcept;
+
+    // Overlays collected by overlay() during this frame's build plus the
+    // previous frame's laid-out snapshot for the damage diff. Overlay
+    // element paths carry a {-1, index} sentinel prefix so they never
+    // collide with main-tree paths.
+    std::vector<ElementPtr> frame_overlays_;
+    std::vector<ElementPtr> prev_overlays_;
+    // Overlay-aware hit test: overlays topmost-first, then the main tree.
+    [[nodiscard]] const Element* hit_test_all(float lx, float ly, Path& path) const noexcept;
 
     friend LRESULT CALLBACK host_wndproc(HWND, UINT, WPARAM, LPARAM) noexcept;
 

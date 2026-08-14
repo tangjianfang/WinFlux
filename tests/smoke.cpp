@@ -191,6 +191,65 @@ void test_scroll_layout() {
     }
 }
 
+void test_overlay_anchoring() {
+    LayoutContext zero;
+    // Mirrors the Host's leaf measurement: explicit Props size wins, else 0.
+    zero.measure_leaf = [](const Element& e) {
+        return std::pair<float, float>{e.props.width.value_or(0.0f),
+                                       e.props.height.value_or(0.0f)};
+    };
+
+    // Anchoring pattern 1 — centred modal: full-canvas column with
+    // justify=center align=center; a 480x280 card lands at the middle.
+    {
+        Props root_p;
+        root_p.direction = Direction::column;
+        root_p.justify = Justify::center;
+        root_p.align = Align::center;
+        Props card_p; card_p.width = 480.0f; card_p.height = 280.0f;
+        auto root = with_children(view(std::move(root_p)), {view(std::move(card_p))});
+        flex_layout(*root, 1000.0f, 600.0f, zero);
+        const Element& card = *root->children[0];
+        expect(near_eq(card.x + card.w * 0.5f, 500.0f) &&
+               near_eq(card.y + card.h * 0.5f, 300.0f),
+               "overlay anchoring: centred modal");
+    }
+
+    // Anchoring pattern 2 — corner toast stack: justify=end align=end with
+    // padding; the card's bottom-right corner sits at canvas minus padding.
+    {
+        Props root_p;
+        root_p.direction = Direction::column;
+        root_p.justify = Justify::end;
+        root_p.align = Align::end;
+        root_p.padding = {24, 24, 24, 24};
+        Props card_p; card_p.width = 260.0f; card_p.height = 48.0f;
+        auto root = with_children(view(std::move(root_p)), {view(std::move(card_p))});
+        flex_layout(*root, 1000.0f, 600.0f, zero);
+        const Element& card = *root->children[0];
+        expect(near_eq(card.x + card.w, 976.0f) && near_eq(card.y + card.h, 576.0f),
+               "overlay anchoring: corner toast");
+    }
+
+    // Anchoring pattern 3 — popup below a (100,60,200,30) anchor rect:
+    // spacer(height=90) + row{spacer(width=100), menu 120x40}.
+    {
+        Props root_p; root_p.direction = Direction::column;
+        Props gap_p; gap_p.height = 90.0f;   // anchor.bottom
+        Props row_p; row_p.direction = Direction::row;
+        Props indent_p; indent_p.width = 100.0f;   // anchor.left
+        Props menu_p; menu_p.width = 120.0f; menu_p.height = 40.0f;
+        auto row = with_children(view(std::move(row_p)),
+                                 {view(std::move(indent_p)), view(std::move(menu_p))});
+        auto root = with_children(view(std::move(root_p)),
+                                  {view(std::move(gap_p)), std::move(row)});
+        flex_layout(*root, 1000.0f, 600.0f, zero);
+        const Element& menu = *root->children[1]->children[1];
+        expect(near_eq(menu.x, 100.0f) && near_eq(menu.y, 90.0f),
+               "overlay anchoring: below-rect popup");
+    }
+}
+
 void test_animation() {
     // Curves: endpoints exact, clamped, front/back-loaded as designed.
     expect(near_eq(apply_curve(0.0f, Curve::linear), 0.0f) &&
@@ -516,6 +575,7 @@ int main() {
     test_animation();
     test_justify();
     test_scroll_layout();
+    test_overlay_anchoring();
     test_builders();
     test_layout_row_grow();
     test_layout_column_center();
