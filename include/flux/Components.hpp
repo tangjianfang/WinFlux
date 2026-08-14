@@ -106,4 +106,33 @@ void modal_show(ModalHost&, std::wstring title, ElementPtr body,
 void modal_close(ModalHost&) noexcept;
 void overlay_modal(Host&, ModalHost&, const Palette&) noexcept;
 
+// ---- Charts ----------------------------------------------------------------
+// All charts draw through the Props::paint escape hatch; `paint_id`
+// derives from the series so unchanged charts keep the partial-repaint
+// fast path. Geometry helpers are pure functions (smoke-tested).
+
+struct PieSlice {
+    float start_deg = 0.0f;
+    float sweep_deg = 0.0f;
+};
+
+[[nodiscard]] std::pair<float, float> value_range(const std::vector<float>& values) noexcept;
+[[nodiscard]] std::vector<std::pair<float, float>> line_points(
+    const std::vector<float>& values, float x, float y, float w, float h) noexcept;
+[[nodiscard]] std::vector<PieSlice> pie_slices(const std::vector<float>& values) noexcept;
+[[nodiscard]] std::vector<std::pair<float, float>> arc_points(
+    float cx, float cy, float r, float start_deg, float sweep_deg,
+    float step_deg) noexcept;
+
+[[nodiscard]] ElementPtr line_chart(const Palette& pal, std::vector<float> values,
+                                    Props p = {});
+[[nodiscard]] ElementPtr area_chart(const Palette& pal, std::vector<float> values,
+                                    Props p = {});
+[[nodiscard]] ElementPtr sparkline(const Palette& pal, std::vector<float> values,
+                                   Props p = {});
+[[nodiscard]] ElementPtr pie_chart(const Palette& pal, std::vector<float> values,
+                                   std::vector<std::wstring> labels, Props p = {});
+[[nodiscard]] ElementPtr gauge(const Palette& pal, float value /* 0..1 */,
+                               std::wstring caption, Props p = {});
+
 } // namespace flux::ui

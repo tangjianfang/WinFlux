@@ -108,6 +108,7 @@ bool DamageTracker::paint_props_equal(const Props& a, const Props& b) noexcept {
     if (a.background_gradient != b.background_gradient) return false;
     if (a.shadow_elevation != b.shadow_elevation) return false;
     if (a.icon != b.icon) return false;
+    if (a.paint_id != b.paint_id) return false;
     if (a.text != b.text) return false;
     if (a.font_size_pt != b.font_size_pt) return false;
     if (a.text_color != b.text_color) return false;

@@ -23,6 +23,7 @@ add_library(flux STATIC
     src/core/Host.cpp
     src/components/Navigation.cpp
     src/components/Overlays.cpp
+    src/components/Charts.cpp
 )
 add_library(WinFlux::flux ALIAS flux)
 

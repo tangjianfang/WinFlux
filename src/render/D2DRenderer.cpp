@@ -578,6 +578,88 @@ void D2DRenderer::draw_icon(Rect box, IconKind kind, Color c, float stroke_w,
     frame_rt_->SetTransform(world);
 }
 
+void D2DRenderer::draw_polyline(const std::vector<std::pair<float, float>>& pts,
+                                Color c, float stroke_w, float alpha) noexcept {
+    if (frame_rt_ == nullptr || pts.size() < 2) return;
+    ID2D1Factory* fac = nullptr;
+    frame_rt_->GetFactory(&fac);
+    if (fac == nullptr) return;
+    ID2D1SolidColorBrush* b = brush(c);
+    if (b == nullptr) return;
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> geo;
+    if (FAILED(fac->CreatePathGeometry(geo.GetAddressOf()))) return;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geo->Open(sink.GetAddressOf()))) return;
+    sink->BeginFigure(D2D1::Point2F(pts[0].first, pts[0].second),
+                      D2D1_FIGURE_BEGIN_HOLLOW);
+    std::vector<D2D1_POINT_2F> rest;
+    rest.reserve(pts.size() - 1);
+    for (size_t i = 1; i < pts.size(); ++i)
+        rest.push_back(D2D1::Point2F(pts[i].first, pts[i].second));
+    sink->AddLines(rest.data(), static_cast<UINT>(rest.size()));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    if (FAILED(sink->Close())) return;
+    b->SetOpacity(alpha);
+    frame_rt_->DrawGeometry(geo.Get(), b, stroke_w);
+}
+
+void D2DRenderer::draw_polygon(const std::vector<std::pair<float, float>>& pts,
+                               Color c, float alpha) noexcept {
+    if (frame_rt_ == nullptr || pts.size() < 3) return;
+    ID2D1Factory* fac = nullptr;
+    frame_rt_->GetFactory(&fac);
+    if (fac == nullptr) return;
+    ID2D1SolidColorBrush* b = brush(c);
+    if (b == nullptr) return;
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> geo;
+    if (FAILED(fac->CreatePathGeometry(geo.GetAddressOf()))) return;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geo->Open(sink.GetAddressOf()))) return;
+    sink->BeginFigure(D2D1::Point2F(pts[0].first, pts[0].second),
+                      D2D1_FIGURE_BEGIN_FILLED);
+    std::vector<D2D1_POINT_2F> rest;
+    rest.reserve(pts.size() - 1);
+    for (size_t i = 1; i < pts.size(); ++i)
+        rest.push_back(D2D1::Point2F(pts[i].first, pts[i].second));
+    sink->AddLines(rest.data(), static_cast<UINT>(rest.size()));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) return;
+    b->SetOpacity(alpha);
+    frame_rt_->FillGeometry(geo.Get(), b);
+}
+
+void D2DRenderer::draw_pie_slice(float cx, float cy, float r, float start_deg,
+                                 float sweep_deg, Color c, float alpha) noexcept {
+    if (frame_rt_ == nullptr || r <= 0.0f || sweep_deg == 0.0f) return;
+    ID2D1Factory* fac = nullptr;
+    frame_rt_->GetFactory(&fac);
+    if (fac == nullptr) return;
+    ID2D1SolidColorBrush* b = brush(c);
+    if (b == nullptr) return;
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> geo;
+    if (FAILED(fac->CreatePathGeometry(geo.GetAddressOf()))) return;
+    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geo->Open(sink.GetAddressOf()))) return;
+
+    constexpr float kPi = 3.14159265358979f;
+    const auto pt_on = [&](float deg) {
+        const float rad = (deg - 90.0f) * kPi / 180.0f;   // 0deg = 12 o'clock
+        return D2D1::Point2F(cx + r * std::sin(rad), cy - r * std::cos(rad));
+    };
+    sink->BeginFigure(D2D1::Point2F(cx, cy), D2D1_FIGURE_BEGIN_FILLED);
+    D2D1_ARC_SEGMENT arc{};
+    arc.point = pt_on(start_deg + sweep_deg);
+    arc.size = D2D1::SizeF(r, r);
+    arc.sweepDirection = D2D1_SWEEP_DIRECTION_CLOCKWISE;
+    arc.arcSize = sweep_deg > 180.0f ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL;
+    sink->AddLine(pt_on(start_deg));
+    sink->AddArc(arc);
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) return;
+    b->SetOpacity(alpha);
+    frame_rt_->FillGeometry(geo.Get(), b);
+}
+
 void D2DRenderer::push_clip(Rect r) noexcept {
     if (frame_rt_ == nullptr) return;
     frame_rt_->PushAxisAlignedClip(to_rect(r), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);

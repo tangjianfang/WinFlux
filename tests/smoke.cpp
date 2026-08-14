@@ -351,6 +351,56 @@ void test_components() {
     }
 }
 
+void test_charts() {
+    // value_range pads flat series so the line sits mid-box.
+    {
+        const auto [lo, hi] = ui::value_range({5.0f, 5.0f, 5.0f});
+        expect(lo == 4.0f && hi == 6.0f, "flat series pads by 1");
+        const auto r = ui::value_range({1.0f, 3.0f, 2.0f});
+        expect(r.first == 1.0f && r.second == 3.0f, "value_range min/max");
+    }
+    // line_points: normalized endpoints, low value -> larger y.
+    {
+        const auto pts = ui::line_points({0.0f, 10.0f}, 0.0f, 0.0f, 100.0f, 50.0f);
+        expect(pts.size() == 2, "one point per value");
+        expect(near_eq(pts[0].first, 0.0f) && near_eq(pts[1].first, 100.0f),
+               "x spans the width");
+        expect(pts[0].second > pts[1].second, "higher value -> smaller y");
+    }
+    // pie_slices: sweeps sum to 360, proportionality respected.
+    {
+        const auto s = ui::pie_slices({1.0f, 3.0f});
+        expect(s.size() == 2, "one slice per value");
+        float total = 0.0f;
+        for (const auto& sl : s) total += sl.sweep_deg;
+        expect(near_eq(total, 360.0f), "sweeps sum to 360");
+        expect(near_eq(s[1].sweep_deg, 270.0f), "slice proportional to value");
+        expect(near_eq(s[0].start_deg, 0.0f) && near_eq(s[1].start_deg, 90.0f),
+               "slices start where the previous ended");
+    }
+    // arc_points: endpoints on the circle at 0/180 degrees.
+    {
+        const auto a = ui::arc_points(50.0f, 50.0f, 40.0f, 0.0f, 180.0f, 10.0f);
+        expect(a.size() >= 2, "arc has points");
+        expect(near_eq(a.front().first, 50.0f) && near_eq(a.front().second, 10.0f),
+               "arc starts at 12 o'clock");
+        expect(near_eq(a.back().first, 50.0f) && near_eq(a.back().second, 90.0f),
+               "half arc ends at 6 o'clock");
+    }
+    // Chart components carry a paint callback + data-derived paint_id.
+    {
+        const Palette pal = palette(ThemeMode::light);
+        auto c1 = ui::line_chart(pal, {1.0f, 2.0f, 3.0f});
+        auto c2 = ui::line_chart(pal, {1.0f, 2.0f, 4.0f});
+        expect(c1->props.paint != nullptr, "line_chart installs a painter");
+        expect(c1->props.paint_id != c2->props.paint_id,
+               "different series -> different paint_id (diff-friendly)");
+        auto g = ui::gauge(pal, 0.5f, L"CPU");
+        expect(g->props.paint != nullptr && !g->children.empty(),
+               "gauge has painter + caption overlay");
+    }
+}
+
 void test_animation() {
     // Curves: endpoints exact, clamped, front/back-loaded as designed.
     expect(near_eq(apply_curve(0.0f, Curve::linear), 0.0f) &&
@@ -681,6 +731,7 @@ int main() {
     test_scroll_layout();
     test_overlay_anchoring();
     test_components();
+    test_charts();
     test_builders();
     test_layout_row_grow();
     test_layout_column_center();

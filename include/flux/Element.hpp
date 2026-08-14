@@ -18,6 +18,8 @@
 
 namespace flux {
 
+class D2DRenderer;   // custom-paint callback target (Props::paint)
+
 enum class Direction { row, column };
 enum class Align { start, center, end, stretch };
 // Main-axis packing when children don't fill the available space and none
@@ -80,6 +82,14 @@ struct Props {
     std::optional<Gradient> background_gradient;   // wins over background
     int shadow_elevation = 0;                      // 0..3 hand-drawn falloff
     std::optional<IconKind> icon;                  // icon element payload, or inline glyph on button/label
+    // Escape hatch for compositions that need arbitrary drawing (charts,
+    // gauges, ...). Called at render time with the element's laid-out rect
+    // (logical units) after background/border, before children. The diff
+    // can't compare callbacks — derive `paint_id` from the data the
+    // callback draws (e.g. hash of the series) so unchanged charts keep
+    // the partial-repaint fast path.
+    std::function<void(D2DRenderer&, float x, float y, float w, float h)> paint;
+    unsigned paint_id = 0;
 
     // Text
     std::wstring text;

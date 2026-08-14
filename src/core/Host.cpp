@@ -1214,6 +1214,8 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
             renderer_.draw_round_rect(Rect{r.x + half, r.y + half, r.w - p.border_width, r.h - p.border_width},
                                       p.radius, *p.border_color, p.border_width, op);
         }
+        // Custom painter (charts, gauges): after the chrome, before children.
+        if (p.paint) p.paint(renderer_, r.x, r.y, r.w, r.h);
     }
 
     // Typed-element glyphs.

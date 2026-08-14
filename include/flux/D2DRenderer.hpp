@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "Element.hpp"
 #include "Presenter.hpp"   // Rect + IPresenter + SurfaceFrame
@@ -62,6 +63,15 @@ public:
     // has any (play/pause triangles, notification dots, ...).
     void draw_icon(Rect box, IconKind kind, Color c, float stroke_w,
                    float alpha = 1.0f) noexcept;
+    // Chart primitives (logical units). Polyline strokes connect the points
+    // in order; polygon fills the closed shape; pie slices are filled
+    // wedge figures (angles in degrees, 0 = +x axis, clockwise).
+    void draw_polyline(const std::vector<std::pair<float, float>>& pts, Color c,
+                       float stroke_w, float alpha = 1.0f) noexcept;
+    void draw_polygon(const std::vector<std::pair<float, float>>& pts, Color c,
+                      float alpha = 1.0f) noexcept;
+    void draw_pie_slice(float cx, float cy, float r, float start_deg,
+                        float sweep_deg, Color c, float alpha = 1.0f) noexcept;
     [[nodiscard]] std::pair<float, float> measure_text(const std::wstring& text,
                                                        float size_pt, bool bold) noexcept;
     void push_clip(Rect r) noexcept;
