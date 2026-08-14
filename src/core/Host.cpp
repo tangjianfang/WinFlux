@@ -673,7 +673,10 @@ void Host::paint_frame() noexcept {
             // tree during measure_impl see a 0×0 leaf and collapse the
             // subtree to intrinsic 0. The bar chart's bars and spacers and
             // the avatar group's 32-px circles all rely on this.
-            const float w = e.props.width.value_or(tw);
+            const float extra = e.props.icon.has_value()
+                ? 20.0f + static_cast<float>(tokens::spacing_sm)
+                : 0.0f;
+            const float w = e.props.width.value_or(tw) + extra;
             const float h = e.props.height.value_or(th);
             return {w, h};
         };
@@ -809,25 +812,36 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         : 0.0f;
     const bool focused = path == focus_path_;
     const Palette& pal = shown_;
+    const float op = std::clamp(p.opacity, 0.0f, 1.0f);
 
-    // Background: disabled snaps; hover/press highlight ramps over
-    // motion_fast_ms (blend of the base with each state colour).
-    if (p.background.has_value()) {
-        Color bg = *p.background;
-        if (!p.enabled && p.disabled_background.has_value()) {
-            bg = *p.disabled_background;
-        } else {
-            if (hover_t > 0.0f && p.hover_background.has_value())
-                bg = lerp(bg, *p.hover_background, hover_t);
-            if (press_t > 0.0f && p.pressed_background.has_value())
-                bg = lerp(bg, *p.pressed_background, press_t);
+    // Background stack: shadow below, gradient (or solid) fill, border on
+    // top. An opacity of 0 hides the element's own paint but not its
+    // children (they carry their own opacity).
+    if (op > 0.001f) {
+        if (p.shadow_elevation > 0) {
+            renderer_.draw_shadow(r, p.radius, p.shadow_elevation);
         }
-        renderer_.fill_round_rect(r, p.radius, bg);
-    }
-    if (p.border_color.has_value() && p.border_width > 0.0f) {
-        const float half = p.border_width * 0.5f;
-        renderer_.draw_round_rect(Rect{r.x + half, r.y + half, r.w - p.border_width, r.h - p.border_width},
-                                  p.radius, *p.border_color, p.border_width);
+        if (p.background_gradient.has_value()) {
+            renderer_.fill_round_rect_gradient(r, p.radius, *p.background_gradient, op);
+        } else if (p.background.has_value()) {
+            // Disabled snaps; hover/press highlight ramps over
+            // motion_fast_ms (blend of the base with each state colour).
+            Color bg = *p.background;
+            if (!p.enabled && p.disabled_background.has_value()) {
+                bg = *p.disabled_background;
+            } else {
+                if (hover_t > 0.0f && p.hover_background.has_value())
+                    bg = lerp(bg, *p.hover_background, hover_t);
+                if (press_t > 0.0f && p.pressed_background.has_value())
+                    bg = lerp(bg, *p.pressed_background, press_t);
+            }
+            renderer_.fill_round_rect(r, p.radius, bg, op);
+        }
+        if (p.border_color.has_value() && p.border_width > 0.0f) {
+            const float half = p.border_width * 0.5f;
+            renderer_.draw_round_rect(Rect{r.x + half, r.y + half, r.w - p.border_width, r.h - p.border_width},
+                                      p.radius, *p.border_color, p.border_width, op);
+        }
     }
 
     // Typed-element glyphs.
@@ -835,7 +849,27 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const Color tc = (!p.enabled && p.disabled_text_color.has_value())
                              ? *p.disabled_text_color
                              : p.text_color.value_or(pal.text);
-        renderer_.draw_text(r, p.text, p.font_size_pt, tc, p.bold, p.text_align);
+        // Optional inline icon (20 px box) shifts the text rect right.
+        Rect text_r = r;
+        if (p.icon.has_value() && op > 0.001f) {
+            constexpr float kInline = 20.0f;
+            const float iy = r.y + (r.h - kInline) * 0.5f;
+            renderer_.draw_icon(Rect{r.x + p.padding.left, iy, kInline, kInline},
+                                *p.icon, tc, 1.8f, op);
+            text_r = Rect{r.x + p.padding.left + kInline + static_cast<float>(tokens::spacing_sm),
+                          r.y,
+                          r.w - p.padding.left - kInline - static_cast<float>(tokens::spacing_sm) - p.padding.right,
+                          r.h};
+        }
+        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, p.bold, p.text_align, op);
+    } else if (e.type == L"icon") {
+        const float side = std::min(r.w, r.h);
+        if (side > 0.0f && op > 0.001f) {
+            const float ix = r.x + (r.w - side) * 0.5f;
+            const float iy = r.y + (r.h - side) * 0.5f;
+            renderer_.draw_icon(Rect{ix, iy, side, side}, p.icon.value_or(IconKind::close),
+                                p.text_color.value_or(pal.text), side / 12.0f, op);
+        }
     } else if (e.type == L"checkbox") {
         const float box = static_cast<float>(tokens::checkbox_box);
         const float box_y = e.y + (e.h - box) * 0.5f;
@@ -844,25 +878,25 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const Color border_c = !p.enabled ? pal.divider
                               : is_checked || hovered || focused ? pal.accent : pal.border;
         renderer_.fill_round_rect(box_r, static_cast<float>(tokens::radius_sm),
-                                  is_checked && p.enabled ? pal.accent : pal.surface);
-        renderer_.draw_round_rect(box_r, static_cast<float>(tokens::radius_sm), border_c, 1.5f);
+                                  is_checked && p.enabled ? pal.accent : pal.surface, op);
+        renderer_.draw_round_rect(box_r, static_cast<float>(tokens::radius_sm), border_c, 1.5f, op);
         if (is_checked) {
             const Color tick = p.enabled ? pal.on_accent : pal.divider;
             renderer_.draw_line(e.x + box * 0.22f, box_y + box * 0.52f,
-                                e.x + box * 0.42f, box_y + box * 0.72f, tick, 2.0f);
+                                e.x + box * 0.42f, box_y + box * 0.72f, tick, 2.0f, op);
             renderer_.draw_line(e.x + box * 0.42f, box_y + box * 0.72f,
-                                e.x + box * 0.78f, box_y + box * 0.30f, tick, 2.0f);
+                                e.x + box * 0.78f, box_y + box * 0.30f, tick, 2.0f, op);
         }
         const Color tc = p.enabled ? pal.text : pal.text_secondary;
         const Rect text_r{e.x + box + tokens::spacing_sm, e.y,
                           e.w - box - tokens::spacing_sm, e.h};
-        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, false, Align::start);
+        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, false, Align::start, op);
     } else if (e.type == L"progress") {
-        renderer_.fill_round_rect(r, p.radius, pal.surface_variant);
+        renderer_.fill_round_rect(r, p.radius, pal.surface_variant, op);
         const float fill_w = e.w * p.progress_value;
         if (fill_w > 0.5f) {
             renderer_.push_clip(r);
-            renderer_.fill_round_rect(Rect{e.x, e.y, fill_w, e.h}, p.radius, pal.accent);
+            renderer_.fill_round_rect(Rect{e.x, e.y, fill_w, e.h}, p.radius, pal.accent, op);
             renderer_.pop_clip();
         }
     } else if (e.type == L"text_input") {
@@ -873,13 +907,13 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const Color border_c = is_focused && p.enabled ? pal.accent
                             : !p.enabled ? pal.divider
                             : (p.border_color.value_or(pal.border));
-        renderer_.fill_round_rect(r, p.radius, bg);
+        renderer_.fill_round_rect(r, p.radius, bg, op);
         renderer_.draw_round_rect(Rect{r.x + 0.5f, r.y + 0.5f, r.w - 1.0f, r.h - 1.0f},
-                                  p.radius, border_c, p.border_width);
+                                  p.radius, border_c, p.border_width, op);
         const Color tc = p.enabled ? pal.text : pal.text_secondary;
         const Rect text_r{r.x + p.padding.left, r.y,
                           r.w - p.padding.left - p.padding.right, r.h};
-        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, false, Align::start);
+        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, false, Align::start, op);
         // Caret: thin 1px accent line at the trailing edge of the text. No
         // blink animation in this pass; a blink would need a timer + State<T>
         // round-trip and the existing framework doesn't have a cheap hook
@@ -890,7 +924,7 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
             const float caret_h = th;
             const float caret_y = r.y + (r.h - caret_h) * 0.5f;
             renderer_.fill_round_rect(Rect{caret_x, caret_y, 1.5f, caret_h},
-                                      0.5f, pal.accent);
+                                      0.5f, pal.accent, op);
         }
     } else if (e.type == L"slider") {
         const float track_h = 4.0f;
@@ -899,13 +933,13 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
                           : (path == pressed_path_) ? pal.surface_variant
                           : pal.surface_variant;
         renderer_.fill_round_rect(Rect{r.x, track_y, r.w, track_h},
-                                  track_h * 0.5f, track_c);
+                                  track_h * 0.5f, track_c, op);
         const float fill_w = std::clamp(r.w * std::clamp(p.slider_value, 0.0f, 1.0f),
                                         0.0f, r.w);
         if (fill_w > 0.5f) {
             renderer_.fill_round_rect(Rect{r.x, track_y, fill_w, track_h},
                                       track_h * 0.5f,
-                                      p.enabled ? pal.accent : pal.divider);
+                                      p.enabled ? pal.accent : pal.divider, op);
         }
         const float thumb_r = (r.h - track_h) * 0.5f + 2.0f;
         const float thumb_x = r.x + fill_w;
@@ -913,27 +947,27 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const Color thumb_c = !p.enabled ? pal.text_secondary : pal.accent;
         renderer_.fill_round_rect(
             Rect{thumb_x - thumb_r, thumb_y - thumb_r, thumb_r * 2.0f, thumb_r * 2.0f},
-            thumb_r, thumb_c);
+            thumb_r, thumb_c, op);
     } else if (e.type == L"toggle") {
         const bool is_on = p.checked.value_or(false);
         const Color track_c = !p.enabled ? pal.divider
                           : is_on ? pal.accent
                           : (path == pressed_path_) ? pal.surface_variant
                           : pal.surface_variant;
-        renderer_.fill_round_rect(r, r.h * 0.5f, track_c);
+        renderer_.fill_round_rect(r, r.h * 0.5f, track_c, op);
         const float knob_r = (r.h - 4.0f) * 0.5f;
         const float knob_x = is_on ? (r.x + r.w - r.h * 0.5f)
                                    : (r.x + r.h * 0.5f);
         const float knob_y = r.y + r.h * 0.5f;
         renderer_.fill_round_rect(
             Rect{knob_x - knob_r, knob_y - knob_r, knob_r * 2.0f, knob_r * 2.0f},
-            knob_r, p.enabled ? pal.on_accent : pal.text_secondary);
+            knob_r, p.enabled ? pal.on_accent : pal.text_secondary, op);
     }
 
     // Focus ring — 2px accent, outside-in on the control bounds.
     if (focused && p.focusable && p.enabled) {
         renderer_.draw_round_rect(Rect{r.x + 1.0f, r.y + 1.0f, r.w - 2.0f, r.h - 2.0f},
-                                  p.radius, pal.accent, 2.0f);
+                                  p.radius, pal.accent, 2.0f, op);
     }
 
     // Children paint over the container background (painter's algorithm).
