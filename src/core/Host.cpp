@@ -352,15 +352,13 @@ void Host::animate_for(unsigned ms) noexcept {
 }
 
 void Host::layout_scroll_views(Element& e, const Path& prefix, const LayoutContext& ctx,
-                               std::map<Path, ScrollState>& next) noexcept {    if (e.type == L"scroll_view") {
+                               std::map<Path, ScrollState>& next) noexcept {
+    if (e.type == L"scroll_view") {
         ScrollState st;
         if (const auto it = scrolls_.find(prefix); it != scrolls_.end()) st = it->second;
         st.content_h = layout_scroll_view(e, st.offset_y, ctx);
         st.viewport_h = std::max(0.0f, e.h - e.props.padding.top - e.props.padding.bottom);
         next.emplace(prefix, st);
-        // The content subtree was baked by layout_scroll_view; no further
-        // scroll_views can live inside this frame's content without another
-        // walk — recurse anyway so nested scroll views also get laid out.
     }
     for (size_t i = 0; i < e.children.size(); ++i) {
         Path child = prefix;
@@ -783,6 +781,8 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
         if (const Element* e = resolve(fired);
             e != nullptr && e->props.on_click && e->props.enabled) {
             // The handler may mutate state -> rebuild happens next frame.
+            last_click_lx_ = to_logical_px(px);
+            last_click_ly_ = to_logical_px(py);
             e->props.on_click();
         }
     }
@@ -888,7 +888,6 @@ void Host::handle_char(WPARAM ch) noexcept {
 // =====================================================================
 
 void Host::paint_frame() noexcept {
-    if (painting_ || !renderer_.valid()) return;
     // Short-circuit: if nothing has invalidated the scene since the last paint
     // (and we don't owe a forced full repaint or an in-flight animation /
     // fade frame), the DComp surface is still correct. Skipping avoids

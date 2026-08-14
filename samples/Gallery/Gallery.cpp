@@ -74,6 +74,16 @@ struct App {
     // tween is in flight.
     Animated<float> anim_progress{0.0f};
     Animated<Color> anim_color{rgb(59, 130, 246)};
+    // Round 2 scroll & layer state.
+    State<bool> layer_modal_open;
+    State<bool> layer_popup_open;
+    // Corner toast with an expiry deadline (ms, GetTickCount64 clock).
+    struct LayerToast {
+        unsigned long long deadline_ms;
+        std::wstring text;
+    };
+    std::vector<LayerToast> layer_toasts;
+    int next_layer_toast_seq = 0;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -576,7 +586,7 @@ ElementPtr date_picker(const Palette& pal, int year, int month, int day,
                     if (on_change) on_change(year, month, captured_day);
                 };
             }
-            row->children.push_back(label(cell_p.text, std::move(cell_p)));
+            row->children.push_back(label(cell_p.text, cell_p));
         }
         outer->children.push_back(std::move(row));
     }
@@ -843,7 +853,7 @@ ElementPtr accordion(const Palette& pal, std::vector<TabSpec> items,
         chev_p.text_color = pal.text_secondary;
         chev_p.font_size_pt = tokens::font_caption;
         chev_p.text_align = Align::center;
-        header->children.push_back(label(chev_p.text, std::move(chev_p)));
+        header->children.push_back(label(chev_p.text, chev_p));
 
         item->children.push_back(std::move(header));
 
@@ -931,7 +941,7 @@ ElementPtr pagination(const Palette& pal, int current, int total,
         pg_p.font_size_pt = tokens::font_caption;
         pg_p.text_align = Align::center;
         pg_p.on_click = [on_change, p] { if (on_change) on_change(p); };
-        outer->children.push_back(label(pg_p.text, std::move(pg_p)));
+        outer->children.push_back(label(pg_p.text, pg_p));
     }
     outer->children.push_back(mk_btn(L">", current < total - 1, current + 1));
     return outer;
@@ -968,7 +978,7 @@ ElementPtr alert(const Palette& pal, const wchar_t* kind, const wchar_t* text,
     x_p.font_size_pt = tokens::font_caption;
     x_p.text_align = Align::center;
     x_p.on_click = std::move(on_dismiss);
-    row->children.push_back(label(x_p.text, std::move(x_p)));
+    row->children.push_back(label(x_p.text, x_p));
 
     return row;
 }
@@ -1066,7 +1076,7 @@ ElementPtr toast_bar(const Palette& pal, const ToastEntry& entry,
     close_p.radius = 12.0f;
     close_p.hover_background = pal.surface_variant;
     close_p.on_click = std::move(on_close);
-    outer->children.push_back(label(close_p.text, std::move(close_p)));
+    outer->children.push_back(label(close_p.text, close_p));
 
     return outer;
 }
@@ -1250,7 +1260,7 @@ ElementPtr overlays_section(App& app) {
         empty_p.text_color = pal.text_secondary;
         empty_p.font_size_pt = tokens::font_caption;
         empty_p.text_align = Align::start;
-        toast_stack->children.push_back(label(empty_p.text, std::move(empty_p)));
+        toast_stack->children.push_back(label(empty_p.text, empty_p));
     } else {
         for (const auto& entry : entries) {
             int id = entry.id;
@@ -1272,7 +1282,7 @@ ElementPtr overlays_section(App& app) {
     modal_body_p.text_color = pal.text;
     modal_body_p.font_size_pt = tokens::font_body;
     modal_body_p.text_align = Align::start;
-    auto modal_body = label(modal_body_p.text, std::move(modal_body_p));
+    auto modal_body = label(modal_body_p.text, modal_body_p);
 
     ElementPtr modal_area;
     if (app.modal_open.get()) {
@@ -1288,7 +1298,7 @@ ElementPtr overlays_section(App& app) {
         note_p.text_color = pal.text_secondary;
         note_p.font_size_pt = tokens::font_caption;
         note_p.text_align = Align::start;
-        wrapper->children.push_back(label(note_p.text, std::move(note_p)));
+        wrapper->children.push_back(label(note_p.text, note_p));
         modal_area = std::move(wrapper);
     } else {
         Props trigger_row_p;
@@ -2219,7 +2229,7 @@ ElementPtr motion_section(App& app) {
             p.text_color = pal.text_secondary;
             p.font_size_pt = tokens::font_caption;
             p.text_align = Align::start;
-            return label(p.text, std::move(p));
+            return label(p.text, p);
         }(),
         [&] {
             // Colour tween target card.
@@ -2249,7 +2259,7 @@ ElementPtr motion_section(App& app) {
         } else {
             p.background = pal.surface;
         }
-        return label(p.text, std::move(p));
+        return label(p.text, p);
     };
     auto elev_row = row_view({
         elevation_card(L"elevation 1", 1, std::nullopt),
@@ -2318,6 +2328,207 @@ ElementPtr motion_section(App& app) {
     return section_card(L"Motion & Effects", std::move(body), pal);
 }
 
+// ---- Round 2: Scroll & Layer ------------------------------------------------
+//
+// Exercises the scroll_view element (30 rows, wheel/bar/keys) and the
+// declarative overlay channel: a real scrim+centred modal (Esc / click-
+// outside close), a corner toast stack with auto-expiry, and a popup
+// anchored below the last click point.
+
+ElementPtr scroll_layer_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    // Long list inside a fixed 360-px viewport.
+    auto rows = view();
+    for (int i = 1; i <= 30; ++i) {
+        Props rp;
+        rp.direction = Direction::row;
+        rp.align = Align::center;
+        rp.gap = static_cast<float>(tokens::spacing_sm);
+        rp.padding = EdgeInsets{6.0f, 6.0f, 6.0f, 6.0f};
+        rp.background = (i % 2 == 0) ? pal.surface_variant : pal.surface;
+        rp.radius = static_cast<float>(tokens::radius_sm);
+        auto row = view(std::move(rp));
+        Props np;
+        np.text = L"Row " + std::to_wstring(i) + L" of 30 — scroll me";
+        np.text_color = pal.text;
+        np.font_size_pt = tokens::font_body;
+        np.text_align = Align::start;
+        row->children.push_back(label(np.text, np));
+        rows->children.push_back(std::move(row));
+    }
+    Props rows_p;
+    rows_p.direction = Direction::column;
+    rows_p.gap = static_cast<float>(tokens::spacing_xs);
+    rows = with_children(view(std::move(rows_p)), {std::move(rows)});
+    Props sv_p;
+    sv_p.height = 360.0f;
+    sv_p.border_color = pal.border;
+    sv_p.border_width = 1.0f;
+    sv_p.radius = static_cast<float>(tokens::radius_md);
+    sv_p.padding = EdgeInsets{6.0f, 6.0f, 6.0f, 6.0f};
+    sv_p.flex_grow = 1.0f;
+    auto sv = scroll_view(std::move(rows), std::move(sv_p));
+
+    // Overlay triggers.
+    auto triggers = row_view({
+        button(L"Open modal", [&app] { app.layer_modal_open.set(true); },
+              button_primary(pal)),
+        button(L"Popup at click", [&app] { app.layer_popup_open.set(true); },
+              button_secondary(pal)),
+        button(L"Corner toast", [&app] {
+            const int seq = app.next_layer_toast_seq++;
+            app.layer_toasts.push_back({GetTickCount64() + 2200,
+                                        L"Toast " + std::to_wstring(seq) +
+                                            L" — auto-expires"});
+            app.host.request_render();
+        }, button_secondary(pal)),
+    }, static_cast<float>(tokens::spacing_sm), Align::start);
+
+    auto body = col_view({
+        std::move(triggers),
+        std::move(sv),
+    }, static_cast<float>(tokens::spacing_md));
+    body->props.align = Align::stretch;
+    return section_card(L"Scroll & Layer", std::move(body), pal);
+}
+
+// Overlay roots declared from build() every frame (declarative lifetime).
+void declare_layer_overlays(App& app) {
+    Host& host = app.host;
+    const Palette& pal = host.palette();
+
+    // 1) Modal: full-canvas scrim + centred card. Scrim click / Esc run the
+    //    root's on_click (close).
+    if (app.layer_modal_open.get()) {
+        Props scrim;
+        scrim.background = rgba(0, 0, 0, 96);
+        scrim.direction = Direction::column;
+        scrim.justify = Justify::center;
+        scrim.align = Align::center;
+        scrim.on_click = [&app] { app.layer_modal_open.set(false); };
+        auto root = view(std::move(scrim));
+
+        Props card_p;
+        card_p.background = pal.surface;
+        card_p.radius = static_cast<float>(tokens::radius_lg);
+        card_p.width = 360.0f;
+        card_p.direction = Direction::column;
+        card_p.gap = static_cast<float>(tokens::spacing_md);
+        card_p.padding = pad_all(static_cast<float>(tokens::spacing_lg));
+        card_p.shadow_elevation = 3;
+        auto card = view(std::move(card_p));
+
+        Props title_p;
+        title_p.text = L"A real modal";
+        title_p.text_color = pal.text;
+        title_p.font_size_pt = tokens::font_title;
+        title_p.text_align = Align::start;
+        card->children.push_back(label(title_p.text, title_p));
+
+        Props body_p;
+        body_p.text = L"Scrim blocks the page, Esc / clicking outside closes.";
+        body_p.text_color = pal.text_secondary;
+        body_p.font_size_pt = tokens::font_body;
+        body_p.text_align = Align::start;
+        card->children.push_back(label(body_p.text, body_p));
+
+        card->children.push_back(button(L"Close",
+            [&app] { app.layer_modal_open.set(false); }, button_primary(pal)));
+
+        root->children.push_back(std::move(card));
+        host.overlay(std::move(root));
+    }
+
+    // 2) Anchored popup below the last click point (transparent root =
+    //    click-through outside the menu; click closes via root on_click).
+    if (app.layer_popup_open.get()) {
+        const auto [cx, cy] = host.last_click_pos();
+        Props root_p;
+        root_p.direction = Direction::column;
+        root_p.on_click = [&app] { app.layer_popup_open.set(false); };
+        auto root = view(std::move(root_p));
+
+        Props gap_p;
+        gap_p.height = cy + 4.0f;
+        root->children.push_back(view(std::move(gap_p)));
+
+        Props row_p;
+        row_p.direction = Direction::row;
+        auto row = view(std::move(row_p));
+        Props indent_p;
+        indent_p.width = cx;
+        row->children.push_back(view(std::move(indent_p)));
+
+        Props menu_p;
+        menu_p.background = pal.surface;
+        menu_p.border_color = pal.border;
+        menu_p.border_width = 1.0f;
+        menu_p.radius = static_cast<float>(tokens::radius_md);
+        menu_p.direction = Direction::column;
+        menu_p.padding = pad_all(static_cast<float>(tokens::spacing_sm));
+        menu_p.shadow_elevation = 2;
+        auto menu = view(std::move(menu_p));
+        const wchar_t* items[] = {L"Cut", L"Copy", L"Paste", L"— divider —"};
+        for (const wchar_t* it : items) {
+            Props ip;
+            ip.text = it;
+            ip.text_color = pal.text;
+            ip.font_size_pt = tokens::font_body;
+            ip.text_align = Align::start;
+            ip.height = 26.0f;
+            menu->children.push_back(label(ip.text, ip));
+        }
+        row->children.push_back(std::move(menu));
+        root->children.push_back(std::move(row));
+        host.overlay(std::move(root));
+    }
+
+    // 3) Corner toasts: drop expired entries, keep the clock armed until
+    //    the next deadline, show the rest bottom-right.
+    const unsigned long long now = GetTickCount64();
+    unsigned long long next_deadline = 0;
+    size_t w = 0;
+    for (size_t i = 0; i < app.layer_toasts.size(); ++i) {
+        if (app.layer_toasts[i].deadline_ms > now) {
+            app.layer_toasts[w++] = app.layer_toasts[i];
+            if (next_deadline == 0 || app.layer_toasts[i].deadline_ms < next_deadline)
+                next_deadline = app.layer_toasts[i].deadline_ms;
+        }
+    }
+    if (w < app.layer_toasts.size()) {
+        app.layer_toasts.resize(w);
+        host.request_render();
+    }
+    if (next_deadline != 0) {
+        host.animate_for(static_cast<unsigned>(next_deadline - now) + 2u);
+    }
+    if (!app.layer_toasts.empty()) {
+        Props root_p;
+        root_p.direction = Direction::column;
+        root_p.justify = Justify::end;
+        root_p.align = Align::end;
+        root_p.gap = static_cast<float>(tokens::spacing_sm);
+        root_p.padding = pad_all(static_cast<float>(tokens::spacing_lg));
+        auto root = view(std::move(root_p));
+        for (const auto& t : app.layer_toasts) {
+            Props tp;
+            tp.background = pal.surface;
+            tp.border_color = pal.border;
+            tp.border_width = 1.0f;
+            tp.radius = static_cast<float>(tokens::radius_md);
+            tp.padding = EdgeInsets{10.0f, 10.0f, 10.0f, 10.0f};
+            tp.text = t.text;
+            tp.text_color = pal.text;
+            tp.font_size_pt = tokens::font_caption;
+            tp.text_align = Align::start;
+            tp.shadow_elevation = 2;
+            root->children.push_back(label(tp.text, tp));
+        }
+        host.overlay(std::move(root));
+    }
+}
+
 // ---- Root ------------------------------------------------------------------
 
 // Top-level category tab bar. A thin wrapper over segmented_control so the
@@ -2326,7 +2537,7 @@ ElementPtr tab_bar(App& app) {
     const Palette& pal = app.host.palette();
     auto bar = segmented_control(pal,
         {L"Form controls", L"Pickers", L"Patterns", L"Overlays",
-         L"Data viz", L"Mini-apps", L"Motion"},
+         L"Data viz", L"Mini-apps", L"Motion", L"Scroll"},
         app.gallery_tab.get(),
         [&app](int i) { app.gallery_tab.set(i); });
     return bar;
@@ -2979,6 +3190,16 @@ ElementPtr build_body(App& app) {
             body->children.push_back(std::move(mv));
         }
         return body;
+    case 7:   // Scroll & Layer — scroll_view + overlay channel
+        left_col = mk_col({});
+        right_col = mk_col({});
+        body->children.clear();
+        {
+            auto sv = scroll_layer_section(app);
+            sv->props.flex_grow = 1.0f;
+            body->children.push_back(std::move(sv));
+        }
+        return body;
     default:
         break;
     }
@@ -3006,6 +3227,8 @@ ElementPtr build(App& app) {
     parent->children.push_back(tab_bar(app));
     parent->children.push_back(build_body(app));
     parent->children.push_back(footer(app));
+    // Overlay roots are re-declared every frame while their state is on.
+    declare_layer_overlays(app);
     return parent;
 }
 
@@ -3021,7 +3244,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     if (cmd_line != nullptr && *cmd_line != L'\0') {
         try {
             const int parsed = std::wcstol(cmd_line, nullptr, 10);
-            if (parsed >= 0 && parsed <= 6) initial_tab = parsed;
+            if (parsed >= 0 && parsed <= 7) initial_tab = parsed;
         } catch (...) {
             initial_tab = 0;
         }
@@ -3084,7 +3307,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.cal_month    = app.host.make_state<int>(7);     // August (0-indexed)
     app.cal_selected = app.host.make_state<int>(14);
     app.gallery_tab  = app.host.make_state<int>(initial_tab);
+    app.layer_modal_open = app.host.make_state<bool>(false);
+    app.layer_popup_open = app.host.make_state<bool>(false);
     app.host.set_root_builder([&app] { return build(app); });
+
+    // Screenshot-driven verification seeds (Round 2, temporary): a trailing
+    // "seed" argument pre-opens the layer demos so no synthetic input is
+    // needed to capture them.
+    if (cmd_line != nullptr && wcsstr(cmd_line, L"seed") != nullptr) {
+        app.layer_toasts.push_back({GetTickCount64() + 60000,
+                                    L"Startup toast — seeded"});
+        app.layer_modal_open.set(true);
+    }
 
     Host::Config cfg;
     cfg.title = L"WinFlux Gallery";

@@ -95,6 +95,11 @@ public:
     }
 
     [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
+    // Logical-unit position of the most recent completed click (used by
+    // anchored popups that don't know their trigger's laid-out rect).
+    [[nodiscard]] std::pair<float, float> last_click_pos() const noexcept {
+        return {last_click_lx_, last_click_ly_};
+    }
     [[nodiscard]] ThemeMode theme_mode() const noexcept { return mode_; }
     void set_theme_mode(ThemeMode mode) noexcept;   // starts 200 ms cross-fade
     [[nodiscard]] const Palette& palette() const noexcept { return shown_; }
@@ -225,6 +230,9 @@ private:
     // Last mouse position in logical units (WM_SETCURSOR hit-testing).
     float last_mouse_lx_ = 0.0f;
     float last_mouse_ly_ = 0.0f;
+    // Logical position of the last completed click (anchored popups).
+    float last_click_lx_ = 0.0f;
+    float last_click_ly_ = 0.0f;
     // Unified animation-clock deadline (animate_for). The WM_TIMER stays
     // armed while now < deadline or a theme fade is running.
     unsigned long long anim_deadline_ms_ = 0;
