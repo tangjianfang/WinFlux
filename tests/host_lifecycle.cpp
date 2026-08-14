@@ -50,6 +50,41 @@ int main() {
     host.request_render();   // drives a presenter frame through Host::paint_frame
     check(host.hwnd() != nullptr, "Host survives a paint round-trip");
 
+    // Round 2 coverage: a scroll_view (20 rows) plus a declarative overlay
+    // (scrim + centred card) declared from the root builder every frame.
+    host.set_root_builder([&host] {
+        auto content = view();
+        for (int i = 0; i < 20; ++i) {
+            content->children.push_back(label(L"row " + std::to_wstring(i)));
+        }
+        Props sp;
+        sp.width = 200.0f;
+        sp.height = 150.0f;
+        sp.background = rgb(255, 255, 255);
+        auto sv = scroll_view(std::move(content), std::move(sp));
+
+        Props rp;
+        rp.padding = {16, 16, 16, 16};
+        auto root = with_children(view(std::move(rp)), {std::move(sv)});
+
+        Props scrim;
+        scrim.background = rgba(0, 0, 0, 96);   // scrim: blocks + click-through-children
+        scrim.direction = Direction::column;
+        scrim.justify = Justify::center;
+        scrim.align = Align::center;
+        Props card_p;
+        card_p.background = rgb(255, 255, 255);
+        card_p.width = 120.0f;
+        card_p.height = 48.0f;
+        card_p.radius = 8.0f;
+        auto card = label(L"overlay", std::move(card_p));
+        host.overlay(with_children(view(std::move(scrim)), {std::move(card)}));
+        return root;
+    });
+    host.request_render();   // overlay set changes 0 -> 1: full dirty path
+    host.request_render();   // same shape: overlay diff path
+    check(host.hwnd() != nullptr, "Host survives scroll_view + overlay round-trips");
+
     // Destructor destroys the HWND and tears down the presenter chain.
     if (failures == 0) {
         std::printf("WinFlux host lifecycle: all checks passed.\n");
