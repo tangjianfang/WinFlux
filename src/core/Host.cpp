@@ -62,6 +62,13 @@ ElementPtr progress(float value, Props p) {
     return make(L"progress", std::move(p));
 }
 
+ElementPtr icon(IconKind kind, Props p) {
+    p.icon = kind;
+    if (!p.width.has_value()) p.width = 24.0f;
+    if (!p.height.has_value()) p.height = 24.0f;
+    return make(L"icon", std::move(p));
+}
+
 ElementPtr text_input(std::wstring value, std::function<void(std::wstring)> on_change, Props p) {
     // The text input owns its visual chrome. The change handler is stored in
     // on_text_change; the host's wndproc dispatches WM_CHAR/VK_BACK to the

@@ -21,6 +21,27 @@ namespace flux {
 enum class Direction { row, column };
 enum class Align { start, center, end, stretch };
 
+// Per-element mouse cursor (WM_SETCURSOR resolves the hovered element's
+// effective cursor walking up from the hit target; arrow is the default).
+enum class Cursor { arrow, hand, ibeam, size_ns, size_we, cross };
+
+// 24x24 stroke-grid icon ids, drawn as D2D path geometry (no bitmap/WIC).
+enum class IconKind {
+    chevron_down, chevron_up, chevron_left, chevron_right,
+    close, check, search, plus, minus, hamburger,
+    user, trash, edit, arrow_right, calendar, inbox,
+    play, pause, skip_prev, skip_next,
+    info, success, warning, danger,
+};
+
+// Horizontal left-to-right background gradient (v1: no angle — nothing
+// needs a diagonal yet).
+struct Gradient {
+    Color from{};
+    Color to{};
+    [[nodiscard]] constexpr bool operator==(const Gradient&) const noexcept = default;
+};
+
 struct EdgeInsets {
     float left = 0.0f;
     float top = 0.0f;
@@ -51,6 +72,10 @@ struct Props {
     std::optional<Color> border_color;
     float border_width = 0.0f;
     float radius = 0.0f;
+    float opacity = 1.0f;                          // self-draw alpha, 0..1
+    std::optional<Gradient> background_gradient;   // wins over background
+    int shadow_elevation = 0;                      // 0..3 hand-drawn falloff
+    std::optional<IconKind> icon;                  // icon element payload, or inline glyph on button/label
 
     // Text
     std::wstring text;
@@ -66,6 +91,7 @@ struct Props {
     ValueChangeHandler on_value_change;
     bool focusable = false;
     bool enabled = true;
+    Cursor cursor = Cursor::arrow;
 
     // Typed-element payloads
     std::optional<bool> checked;   // present => checkbox glyph rendering
@@ -97,6 +123,7 @@ using ElementPtr = std::shared_ptr<Element>;
 [[nodiscard]] ElementPtr checkbox(std::wstring text, bool checked,
                                   std::function<void(bool)> on_change, Props p = {});
 [[nodiscard]] ElementPtr progress(float value, Props p = {});
+[[nodiscard]] ElementPtr icon(IconKind kind, Props p = {});
 
 // Interactive primitives beyond button/checkbox. Each owns its own element
 // type so the paint branch can pick the right glyph; builders take the

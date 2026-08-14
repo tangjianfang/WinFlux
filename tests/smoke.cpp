@@ -339,6 +339,28 @@ void test_damage() {
         expect(rects.size() <= d.max_rects, "hover-only diff stays within budget");
     }
 
+    // New paint props (Round 1) must participate in the paint diff;
+    // cursor is interaction-time only and must NOT.
+    {
+        Element base = *view();
+        base.x = 0; base.y = 0; base.w = 10; base.h = 10;
+        Element v = base; v.props.opacity = 0.5f;
+        expect(!DamageTracker::paint_props_equal(base.props, v.props),
+               "opacity change is paint-dirty");
+        v = base; v.props.shadow_elevation = 2;
+        expect(!DamageTracker::paint_props_equal(base.props, v.props),
+               "shadow change is paint-dirty");
+        v = base; v.props.background_gradient = Gradient{rgb(0, 0, 0), rgb(255, 255, 255)};
+        expect(!DamageTracker::paint_props_equal(base.props, v.props),
+               "gradient change is paint-dirty");
+        v = base; v.props.icon = IconKind::close;
+        expect(!DamageTracker::paint_props_equal(base.props, v.props),
+               "icon change is paint-dirty");
+        v = base; v.props.cursor = Cursor::hand;
+        expect(DamageTracker::paint_props_equal(base.props, v.props),
+               "cursor is NOT paint-dirty");
+    }
+
     // Three distinct interaction changes (hover + press + focus all move)
     // pushes up to 6 rects; merge_overlapping collapses any that overlap.
     {
