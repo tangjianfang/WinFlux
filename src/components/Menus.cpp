@@ -7,6 +7,7 @@
 #include <flux/Components.hpp>
 
 #include <algorithm>
+#include <cwctype>
 
 namespace flux::ui {
 
@@ -38,15 +39,9 @@ ElementPtr anchored_popup(float ax, float ay, ClickHandler on_outside,
 }
 
 ElementPtr menu_panel(const Palette& pal) {
-    Props p;
-    p.background = pal.surface;
-    p.border_color = pal.border;
-    p.border_width = 1.0f;
-    p.radius = static_cast<float>(tokens::radius_md);
-    p.direction = Direction::column;
-    p.padding = EdgeInsets{4.0f, 4.0f, 4.0f, 4.0f};
-    p.shadow_elevation = 2;
-    return view(std::move(p));
+    auto card = popup_card(pal, 2);
+    card->props.padding = EdgeInsets{4.0f, 4.0f, 4.0f, 4.0f};
+    return card;
 }
 
 } // namespace
@@ -85,22 +80,12 @@ void overlay_select(Host& host, SelectHost& sel, const Palette& pal,
     auto panel = menu_panel(pal);
     for (size_t i = 0; i < options.size(); ++i) {
         const int idx = static_cast<int>(i);
-        const bool is_sel = idx == sel.selected;
-        Props ip;
-        ip.text = options[i];
-        ip.text_color = is_sel ? pal.on_accent : pal.text;
-        ip.background = is_sel ? std::optional<Color>{pal.accent} : std::nullopt;
-        ip.hover_background = pal.surface_hover;
-        ip.font_size_pt = tokens::font_body;
-        ip.text_align = Align::start;
-        ip.height = 28.0f;
-        ip.padding = EdgeInsets{static_cast<float>(tokens::spacing_sm), 0.0f, 0.0f,
-                                static_cast<float>(tokens::spacing_sm)};
-        ip.on_click = [&sel, on_change, idx] {
-            sel.open = false;
-            if (on_change) on_change(idx);
-        };
-        panel->children.push_back(flux::button(options[i], ip.on_click, ip));
+        panel->children.push_back(menu_item_button(
+            pal, options[i], idx == sel.selected,
+            [&sel, on_change, idx] {
+                sel.open = false;
+                if (on_change) on_change(idx);
+            }, 28.0f, static_cast<float>(tokens::spacing_sm)));
     }
     host.overlay(anchored_popup(sel.ax, sel.ay, [&sel] { sel.open = false; },
                                 std::move(panel)));
@@ -133,21 +118,12 @@ void overlay_menu(Host& host, MenuHost& menu, const Palette& pal) noexcept {
             panel->children.push_back(view(std::move(sep_p)));
             continue;
         }
-        Props ip;
-        ip.text = item.label;
-        ip.text_color = pal.text;
-        ip.hover_background = pal.surface_hover;
-        ip.font_size_pt = tokens::font_body;
-        ip.text_align = Align::start;
-        ip.height = 28.0f;
-        ip.padding = EdgeInsets{static_cast<float>(tokens::spacing_md), 0.0f, 0.0f,
-                                static_cast<float>(tokens::spacing_md)};
         auto activate = item.on_activate;
-        ip.on_click = [&menu, activate] {
-            menu_close(menu);
-            if (activate) activate();
-        };
-        panel->children.push_back(flux::button(item.label, ip.on_click, ip));
+        panel->children.push_back(menu_item_button(
+            pal, item.label, false, [&menu, activate] {
+                menu_close(menu);
+                if (activate) activate();
+            }, 28.0f, static_cast<float>(tokens::spacing_md)));
     }
     host.overlay(anchored_popup(menu.ax, menu.ay, [&menu] { menu_close(menu); },
                                 std::move(panel)));
@@ -163,23 +139,14 @@ std::vector<size_t> filter_commands(const std::vector<CommandItem>& items,
         for (size_t i = 0; i < items.size(); ++i) out.push_back(i);
         return out;
     }
+    const auto lower = [](std::wstring s) {
+        for (wchar_t& c : s) c = static_cast<wchar_t>(std::towlower(c));
+        return s;
+    };
+    const std::wstring q = lower(query);
     for (size_t i = 0; i < items.size(); ++i) {
-        // Case-insensitive substring match.
-        const std::wstring hay(items[i].title);
-        bool matched = false;
-        for (size_t j = 0; j + query.size() <= hay.size() && !matched; ++j) {
-            matched = true;
-            for (size_t k = 0; k < query.size(); ++k) {
-                const auto lc = [](wchar_t c) {
-                    return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c + 32) : c;
-                };
-                if (lc(hay[j + k]) != lc(query[k])) {
-                    matched = false;
-                    break;
-                }
-            }
-        }
-        if (matched) out.push_back(i);
+        // Locale-aware case-insensitive substring match.
+        if (lower(items[i].title).find(q) != std::wstring::npos) out.push_back(i);
     }
     return out;
 }
@@ -203,21 +170,14 @@ void overlay_command_palette(Host& host, CommandHost& cmd, const Palette& pal,
     center_p.justify = Justify::center;
     auto center = view(std::move(center_p));
 
-    Props card_p;
-    card_p.background = pal.surface;
-    card_p.border_color = pal.border;
-    card_p.border_width = 1.0f;
-    card_p.radius = static_cast<float>(tokens::radius_lg);
-    card_p.direction = Direction::column;
-    card_p.width = 460.0f;
-    card_p.shadow_elevation = 3;
-    auto card = view(std::move(card_p));
+    auto card = popup_card(pal, 3, 460.0f);
+    card->props.radius = static_cast<float>(tokens::radius_lg);
 
     // Query input (autofocus drives WM_CHAR here right after Ctrl+K) with
     // arrow/enter/esc handling on the same element (Props.on_key).
-    // Snapshot the filtered matches so the key handler and the rendered
-    // list agree on indices within this frame.
     const std::vector<size_t> matches_copy = filter_commands(items, cmd.query);
+    // NOTE: the key handler re-filters on press (captures the query, not the
+    // snapshot) so arrow/Enter always match what's rendered.
     Props input_p;
     input_p.background = std::nullopt;
     input_p.border_color = std::nullopt;
@@ -270,24 +230,15 @@ void overlay_command_palette(Host& host, CommandHost& cmd, const Palette& pal,
         auto list = view(std::move(list_p));
         for (size_t m = 0; m < shown; ++m) {
             const size_t item_idx = matches_copy[m];
-            const bool is_sel = static_cast<int>(m) == cmd.selected;
-            Props ip;
-            ip.text = items[item_idx].title;
-            ip.text_color = is_sel ? pal.on_accent : pal.text;
-            ip.background = is_sel ? std::optional<Color>{pal.accent} : std::nullopt;
-            ip.hover_background = pal.surface_hover;
-            ip.font_size_pt = tokens::font_body;
-            ip.text_align = Align::start;
-            ip.height = 30.0f;
-            ip.radius = static_cast<float>(tokens::radius_sm);
-            ip.padding = EdgeInsets{static_cast<float>(tokens::spacing_sm), 0.0f, 0.0f,
-                                    static_cast<float>(tokens::spacing_sm)};
             auto run = items[item_idx].run;
-            ip.on_click = [&cmd, run] {
-                cmd.open = false;
-                if (run) run();
-            };
-            list->children.push_back(flux::button(ip.text, ip.on_click, ip));
+            auto row = menu_item_button(
+                pal, items[item_idx].title,
+                static_cast<int>(m) == cmd.selected, [&cmd, run] {
+                    cmd.open = false;
+                    if (run) run();
+                }, 30.0f, static_cast<float>(tokens::spacing_sm));
+            row->props.radius = static_cast<float>(tokens::radius_sm);
+            list->children.push_back(std::move(row));
         }
         card->children.push_back(std::move(list));
     }

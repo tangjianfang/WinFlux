@@ -124,6 +124,26 @@ void overlay_modal(Host&, ModalHost&, const Palette&) noexcept;
 [[nodiscard]] std::wstring validate_email(
     const std::wstring& value, std::wstring message) noexcept;
 
+// ---- Shared chrome helpers -----------------------------------------------------
+
+// Kind -> palette colour (alert and toast kinds share the mapping).
+[[nodiscard]] Color kind_color(const Palette&, AlertKind) noexcept;
+[[nodiscard]] Color kind_color(const Palette&, ToastKind) noexcept;
+// Floating-card chrome: surface + border + radius_md + shadow elevation.
+[[nodiscard]] ElementPtr popup_card(const Palette&, int elevation, float width = 0.0f,
+                                    Props p = {});
+// The selected/unselected menu-row button used by dropdowns, menus and the
+// command-palette result list.
+[[nodiscard]] ElementPtr menu_item_button(const Palette&, const std::wstring& text,
+                                          bool selected, ClickHandler on_click,
+                                          float height = 28.0f,
+                                          float pad_h = static_cast<float>(12));
+// Secondary-text caption label.
+[[nodiscard]] ElementPtr caption(const Palette&, std::wstring text, Props p = {});
+// Icon-only button with tooltip + hover.
+[[nodiscard]] ElementPtr icon_button(const Palette&, IconKind kind, std::wstring tip,
+                                     ClickHandler on_click, float size = 28.0f);
+
 // ---- Charts ----------------------------------------------------------------
 // All charts draw through the Props::paint escape hatch; `paint_id`
 // derives from the series so unchanged charts keep the partial-repaint

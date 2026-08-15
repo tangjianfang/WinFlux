@@ -599,14 +599,27 @@ ElementPtr overlays_section(App& app) {
 
     // ---- Modal: real scrim + centred card (Esc / scrim click close).
     auto open_modal = [&] {
-        Props body_p;
-        body_p.text = L"This dialog is a real overlay: scrim blocks the page, "
-                      L"Esc and clicking outside close it.";
-        body_p.text_color = pal.text;
-        body_p.font_size_pt = tokens::font_body;
-        body_p.text_align = Align::start;
+        // Long scrollable body: exercises scroll_view inside an overlay.
+        auto content = view();
+        for (int i = 1; i <= 24; ++i) {
+            Props lp;
+            lp.text = L"Section " + std::to_wstring(i) +
+                      L" — the modal body scrolls when it outgrows the card. "
+                      L"Wheel, scrollbar drag and arrow keys all work here.";
+            lp.text_color = pal.text_secondary;
+            lp.font_size_pt = tokens::font_body;
+            lp.text_align = Align::start;
+            lp.text_wrap = true;
+            lp.width = 392.0f;   // card 360 - padding; wraps inside the sv
+            content->children.push_back(label(lp.text, lp));
+        }
+        content->props.direction = Direction::column;
+        content->props.gap = static_cast<float>(tokens::spacing_sm);
+        Props sv_p;
+        sv_p.height = 300.0f;
+        sv_p.width = 396.0f;
         ui::modal_show(app.modal_host, L"Confirm action",
-                       label(body_p.text, body_p),
+                       scroll_view(std::move(content), std::move(sv_p)),
                        [] { /* state is app-driven; nothing else to do */ });
         app.host.request_render();
     };
@@ -2441,13 +2454,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     if (cmd_line != nullptr && wcsstr(cmd_line, L"seed") != nullptr) {
         ui::toast_show(app.toast_host, ui::ToastKind::info, L"Startup toast — seeded");
         app.toast_host.entries.back().deadline_ms = GetTickCount64() + 60000;
-        Props body_p;
-        body_p.text = L"Scrim blocks the page, Esc / clicking outside closes.";
-        body_p.text_color = app.host.palette().text;
-        body_p.font_size_pt = tokens::font_body;
-        body_p.text_align = Align::start;
+        // Scrollable body: exercises scroll_view inside an overlay.
+        const Palette& pal = app.host.palette();
+        auto content = view();
+        for (int i = 1; i <= 24; ++i) {
+            Props lp;
+            lp.text = L"Section " + std::to_wstring(i) +
+                      L" — scrollable modal body (wheel / scrollbar / keys).";
+            lp.text_color = pal.text_secondary;
+            lp.font_size_pt = tokens::font_body;
+            lp.text_align = Align::start;
+            content->children.push_back(label(lp.text, lp));
+        }
+        content->props.direction = Direction::column;
+        content->props.gap = static_cast<float>(tokens::spacing_sm);
+        Props sv_p;
+        sv_p.height = 300.0f;
+        sv_p.width = 396.0f;
         ui::modal_show(app.modal_host, L"A real modal",
-                       label(body_p.text, body_p), [] {});
+                       scroll_view(std::move(content), std::move(sv_p)), [] {});
     }
 
     Host::Config cfg;

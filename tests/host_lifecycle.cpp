@@ -6,6 +6,7 @@
 // isolated from the always-fast smoke test.
 
 #include <cstdio>
+#include <cstdlib>
 
 #include <flux/flux.hpp>
 
@@ -28,6 +29,14 @@ void check(bool condition, const char* what) {
 
 int main() {
     enable_per_monitor_dpi_v2();
+
+    // CI runners can't guarantee an interactive window station (D2D device
+    // creation fails in a service session); set WINFLUX_SKIP_GUI_TESTS=1 to
+    // opt this target out there. The headless smoke target always runs.
+    if (std::getenv("WINFLUX_SKIP_GUI_TESTS") != nullptr) {
+        std::printf("WinFluxHostLifecycleTest: skipped (WINFLUX_SKIP_GUI_TESTS set)\n");
+        return 0;
+    }
 
     Host host;
     Host::Config cfg;

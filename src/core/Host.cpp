@@ -411,8 +411,7 @@ void Host::scroll_to(const Path& sv_path, float offset) noexcept {
 
 void Host::handle_mouse_wheel(int delta, int px, int py) noexcept {
     // WM_MOUSEWHEEL delivers SCREEN coordinates; everything downstream is
-    // client-logical. (Test runs that happened to work were positioned
-    // near the screen origin.)
+    // client-logical.
     POINT pt{px, py};
     if (hwnd_ != nullptr) ScreenToClient(hwnd_, &pt);
     const float lx = to_logical_px(pt.x);
@@ -1182,16 +1181,24 @@ void Host::paint_frame() noexcept {
         // and carry scroll offsets over by path identity.
         std::map<Path, ScrollState> next_scrolls;
         layout_scroll_views(*tree_, Path{}, ctx, next_scrolls);
-        scrolls_ = std::move(next_scrolls);
         // Host-native tooltip may append one more pass-through overlay
         // (armed by dwelling hover); it lays out with the rest below.
         update_tooltip();
         // Overlays lay out against the full canvas (anchoring is pure
         // flex — see test_overlay_anchoring). They are collected inside
-        // root_builder_(), which ran above.
-        for (auto& ov : frame_overlays_) {
-            if (ov != nullptr) flex_layout(*ov, logical_w, logical_h, ctx);
+        // root_builder_(), which ran above. Overlay scroll_views lay out
+        // with the sentinel-prefixed paths, so the wheel/keyboard/drag
+        // chain (which already resolves {-1, idx} paths) finds them in
+        // the same scrolls_ registry as main-tree ones.
+        for (size_t oi = 0; oi < frame_overlays_.size(); ++oi) {
+            if (frame_overlays_[oi] == nullptr) continue;
+            flex_layout(*frame_overlays_[oi], logical_w, logical_h, ctx);
+            layout_scroll_views(*frame_overlays_[oi], Path{-1, static_cast<int>(oi)},
+                                ctx, next_scrolls);
         }
+        // Commit AFTER the overlay pass: moving earlier would drop every
+        // sentinel-keyed entry into a moved-from map.
+        scrolls_ = std::move(next_scrolls);
         apply_autofocus();
     }
 

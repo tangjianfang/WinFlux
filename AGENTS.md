@@ -37,6 +37,9 @@ Two CTest targets, intentionally split (see `tests/`):
 
 Headless core checks always run in CI; the lifecycle target is gated behind
 a window session (ctest still runs it — failure is isolated from smoke).
+CI (`.github/workflows/ci.yml`) builds and tests both presets on every
+push/PR; runners without an interactive window station set
+`WINFLUX_SKIP_GUI_TESTS=1` so the lifecycle target opts itself out.
 
 ## Module map
 

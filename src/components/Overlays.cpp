@@ -8,17 +8,81 @@
 
 namespace flux::ui {
 
+// ---- Shared chrome helpers ---------------------------------------------------
+
+Color kind_color(const Palette& pal, AlertKind kind) noexcept {
+    switch (kind) {
+    case AlertKind::info:    return pal.info;
+    case AlertKind::success: return pal.success;
+    case AlertKind::warning: return pal.warning;
+    case AlertKind::danger:  return pal.danger;
+    }
+    return pal.info;
+}
+
+Color kind_color(const Palette& pal, ToastKind kind) noexcept {
+    switch (kind) {
+    case ToastKind::info:    return pal.info;
+    case ToastKind::success: return pal.success;
+    case ToastKind::warning: return pal.warning;
+    case ToastKind::danger:  return pal.danger;
+    }
+    return pal.info;
+}
+
+ElementPtr popup_card(const Palette& pal, int elevation, float width, Props p) {
+    Props cp = std::move(p);
+    cp.background = pal.surface;
+    cp.border_color = pal.border;
+    cp.border_width = 1.0f;
+    cp.radius = static_cast<float>(tokens::radius_md);
+    cp.direction = Direction::column;
+    cp.shadow_elevation = elevation;
+    if (width > 0.0f) cp.width = width;
+    return view(std::move(cp));
+}
+
+ElementPtr menu_item_button(const Palette& pal, const std::wstring& text, bool selected,
+                            ClickHandler on_click, float height, float pad_h) {
+    Props ip;
+    ip.text = text;
+    ip.text_color = selected ? pal.on_accent : pal.text;
+    ip.background = selected ? std::optional<Color>{pal.accent} : std::nullopt;
+    ip.hover_background = pal.surface_hover;
+    ip.font_size_pt = tokens::font_body;
+    ip.text_align = Align::start;
+    ip.height = height;
+    ip.padding = EdgeInsets{pad_h, 0.0f, 0.0f, pad_h};
+    ip.on_click = std::move(on_click);
+    return flux::button(text, ip.on_click, std::move(ip));
+}
+
+ElementPtr caption(const Palette& pal, std::wstring text, Props p) {
+    Props lp = std::move(p);
+    lp.text_color = pal.text_secondary;
+    lp.font_size_pt = tokens::font_caption;
+    lp.text_align = Align::start;
+    return label(text, lp);
+}
+
+ElementPtr icon_button(const Palette& pal, IconKind kind, std::wstring tip,
+                       ClickHandler on_click, float size) {
+    Props p;
+    p.icon = kind;
+    p.width = size;
+    p.height = size;
+    p.text_color = pal.text_secondary;
+    p.hover_background = pal.surface_hover;
+    p.radius = static_cast<float>(tokens::radius_sm);
+    p.tooltip_text = std::move(tip);
+    return flux::button(L"", std::move(on_click), std::move(p));
+}
+
 // ---- Static feedback ----------------------------------------------------
 
 ElementPtr alert(const Palette& pal, AlertKind kind, std::wstring text,
                   std::function<void()> on_dismiss, Props p) {
-    Color stripe = pal.info;
-    switch (kind) {
-    case AlertKind::info:    stripe = pal.info;    break;
-    case AlertKind::success: stripe = pal.success; break;
-    case AlertKind::warning: stripe = pal.warning; break;
-    case AlertKind::danger:  stripe = pal.danger;  break;
-    }
+    Color stripe = kind_color(pal, kind);
 
     // [kind-coloured stripe][text][optional ×] — the stripe stretches to
     // full height via the row's cross-axis stretch.
