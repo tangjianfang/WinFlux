@@ -135,4 +135,61 @@ struct PieSlice {
 [[nodiscard]] ElementPtr gauge(const Palette& pal, float value /* 0..1 */,
                                std::wstring caption, Props p = {});
 
+// ---- Selection & menus ------------------------------------------------------
+
+// Dropdown select. The trigger button is part of the app's tree; the open
+// list is an overlay anchored at SelectHost::ax/ay. Apps set the anchor in
+// their on_open handler (typically from Host::last_click_pos()).
+struct SelectHost {
+    bool open = false;
+    int selected = 0;
+    float ax = 0.0f;
+    float ay = 0.0f;
+};
+
+[[nodiscard]] ElementPtr select(const Palette& pal, const SelectHost&,
+                                std::vector<std::wstring> options,
+                                std::function<void(int)> on_change,
+                                std::function<void(bool)> on_open, Props p = {});
+void overlay_select(Host&, SelectHost&, const Palette&,
+                    std::vector<std::wstring> options,
+                    std::function<void(int)> on_change) noexcept;
+
+struct MenuItem {
+    std::wstring label;   // "-" renders a separator
+    std::function<void()> on_activate;
+};
+
+struct MenuHost {
+    bool open = false;
+    float ax = 0.0f;
+    float ay = 0.0f;
+    std::vector<MenuItem> items;
+};
+
+void menu_show_at(MenuHost&, std::vector<MenuItem> items, float x, float y) noexcept;
+void menu_close(MenuHost&) noexcept;
+void overlay_menu(Host&, MenuHost&, const Palette&) noexcept;
+
+struct CommandItem {
+    std::wstring title;
+    std::function<void()> run;
+};
+
+struct CommandHost {
+    bool open = false;
+    std::wstring query;
+    int selected = 0;
+};
+
+// Case-insensitive substring filter over the command titles.
+[[nodiscard]] std::vector<size_t> filter_commands(const std::vector<CommandItem>&,
+                                                  const std::wstring& query) noexcept;
+
+// Ctrl+K palette: near-top-centred card, autofocus query input (WM_CHAR
+// works right after opening), arrow/Enter/Esc via Props.on_key, first 8
+// results. Apps open it from Host::set_key_hook.
+void overlay_command_palette(Host&, CommandHost&, const Palette&,
+                             std::vector<CommandItem> items) noexcept;
+
 } // namespace flux::ui

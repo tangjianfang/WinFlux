@@ -94,6 +94,16 @@ public:
         return a.current_at(now);
     }
 
+    // App-level key hook, consulted first on every WM_KEYDOWN (e.g. the
+    // command palette's Ctrl+K). Return true to consume the key.
+    void set_key_hook(std::function<bool(unsigned vk)> hook) noexcept {
+        key_hook_ = std::move(hook);
+    }
+    // Right-click notification (WM_CONTEXTMENU) in logical client units.
+    void set_context_menu_handler(std::function<void(float lx, float ly)> h) noexcept {
+        context_menu_handler_ = std::move(h);
+    }
+
     [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
     // Logical-unit position of the most recent completed click (used by
     // anchored popups that don't know their trigger's laid-out rect).
@@ -150,6 +160,7 @@ private:
     void handle_key_down(WPARAM vk) noexcept;
     void handle_char(WPARAM ch) noexcept;
     void handle_mouse_wheel(int delta, int px, int py) noexcept;
+    void handle_contextmenu(int screen_x, int screen_y) noexcept;
     // Applies a scroll delta (or absolute target) to the scroll_view at
     // `sv_path`, clamping to range, arming the auto-hide clock, repainting.
     void scroll_by(const Path& sv_path, float delta) noexcept;
@@ -238,9 +249,15 @@ private:
     // as an extra pass-through overlay after the builder's own overlays.
     void update_tooltip() noexcept;
     [[nodiscard]] ElementPtr build_tooltip(const std::wstring& text) const noexcept;
+    void apply_autofocus() noexcept;
     // Unified animation-clock deadline (animate_for). The WM_TIMER stays
     // armed while now < deadline or a theme fade is running.
     unsigned long long anim_deadline_ms_ = 0;
+    // App-level hooks (set_key_hook / set_context_menu_handler).
+    std::function<bool(unsigned vk)> key_hook_;
+    std::function<void(float, float)> context_menu_handler_;
+    // Tracks whether any element had Props.autofocus this frame.
+    Path autofocus_path_;
     // The text input currently receiving WM_CHAR. A click on a text_input
     // updates this path; WM_CHAR appends (and VK_BACK deletes) one char and
     // invokes the input's on_click handler with the new text. Empty path

@@ -110,6 +110,13 @@ struct Props {
     // motion_slow_ms, the Host shows a small overlay card near the cursor.
     // Interaction-time only — deliberately NOT part of the paint diff.
     std::wstring tooltip_text;
+    // Focused-element key handler: WM_KEYDOWN is dispatched here before the
+    // Host's built-in Tab/Space/scroll handling. Components use it for
+    // arrows / Enter / Esc navigation (command palette, lists).
+    std::function<void(unsigned vk)> on_key;
+    // Auto-focus: the Host steers focused_input_path_ (text caret) to the
+    // first autofocus element laid out this frame (overlays included).
+    bool autofocus = false;
 
     // Typed-element payloads
     std::optional<bool> checked;   // present => checkbox glyph rendering

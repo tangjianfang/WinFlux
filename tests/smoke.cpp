@@ -351,6 +351,61 @@ void test_components() {
     }
 }
 
+void test_menus() {
+    const Palette pal = palette(ThemeMode::light);
+
+    // Select trigger: shows the selected option, click flips open.
+    {
+        ui::SelectHost sel;
+        sel.selected = 1;
+        bool opened = false;
+        auto trigger = ui::select(pal, sel, {L"Red", L"Green", L"Blue"}, nullptr,
+                                  [&](bool open) { opened = open; });
+        expect(trigger->type == L"button" && trigger->props.text == L"Green",
+               "select trigger shows the selected option");
+        trigger->props.on_click();
+        expect(opened, "select trigger click requests open");
+    }
+
+    // Context menu host lifecycle.
+    {
+        ui::MenuHost menu;
+        bool ran = false;
+        ui::menu_show_at(menu,
+                         {ui::MenuItem{L"Copy", [&] { ran = true; }}, ui::MenuItem{L"-", nullptr}},
+                         100.0f, 50.0f);
+        expect(menu.open && menu.items.size() == 2 && menu.ax == 100.0f,
+               "menu_show_at stores position + items");
+        menu.items[0].on_activate();
+        ui::menu_close(menu);
+        expect(ran && !menu.open && menu.items.empty(), "menu_close clears the host");
+    }
+
+    // Command filter: case-insensitive substring, empty query = all.
+    {
+        std::vector<ui::CommandItem> cmds = {
+            {L"Go to Dashboard", nullptr},
+            {L"Toggle Dark Mode", nullptr},
+            {L"Open Settings", nullptr},
+        };
+        expect(ui::filter_commands(cmds, L"").size() == 3, "empty query matches all");
+        const auto m1 = ui::filter_commands(cmds, L"dash");
+        expect(m1.size() == 1 && m1[0] == 0, "lowercase query matches capitalized title");
+        expect(ui::filter_commands(cmds, L"MODE").size() == 1, "uppercase query matches");
+        expect(ui::filter_commands(cmds, L"zzz").empty(), "no match yields empty");
+    }
+
+    // on_key / autofocus are interaction-time only (not paint-dirty).
+    {
+        Element base = *view();
+        Element v = base;
+        v.props.on_key = [](unsigned) {};
+        v.props.autofocus = true;
+        expect(DamageTracker::paint_props_equal(base.props, v.props),
+               "on_key/autofocus are NOT paint-dirty");
+    }
+}
+
 void test_charts() {
     // value_range pads flat series so the line sits mid-box.
     {
@@ -731,6 +786,7 @@ int main() {
     test_scroll_layout();
     test_overlay_anchoring();
     test_components();
+    test_menus();
     test_charts();
     test_builders();
     test_layout_row_grow();

@@ -231,6 +231,12 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 host->handle_mouse_wheel(static_cast<int>(GET_WHEEL_DELTA_WPARAM(wparam)),
                                          GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
                 return 0;
+            case WM_CONTEXTMENU: {
+                const int sx = GET_X_LPARAM(lparam);
+                const int sy = GET_Y_LPARAM(lparam);
+                host->handle_contextmenu(sx, sy);
+                return 0;
+            }
             case WM_TIMER:
                 if (wparam == Host::anim_timer_id_) host->handle_timer();
                 return 0;
@@ -855,8 +861,46 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
     }
 }
 
+// Points the text-input focus (WM_CHAR caret) at the first element laid
+// out this frame with Props.autofocus (main tree first, then overlays).
+// Used by the command palette so typing works right after Ctrl+K.
+void Host::apply_autofocus() noexcept {
+    autofocus_path_.clear();
+    std::function<void(const Element&, const Path&)> walk =
+        [&](const Element& e, const Path& prefix) {
+            if (!autofocus_path_.empty()) return;
+            if (e.props.autofocus && e.type == L"text_input") {
+                autofocus_path_ = prefix;
+                return;
+            }
+            for (size_t i = 0; i < e.children.size() && autofocus_path_.empty(); ++i) {
+                Path child = prefix;
+                child.push_back(static_cast<int>(i));
+                walk(*e.children[i], child);
+            }
+        };
+    if (tree_ != nullptr) walk(*tree_, Path{});
+    for (size_t oi = 0; oi < frame_overlays_.size() && autofocus_path_.empty(); ++oi) {
+        if (frame_overlays_[oi] != nullptr) {
+            walk(*frame_overlays_[oi], Path{-1, static_cast<int>(oi)});
+        }
+    }
+    if (!autofocus_path_.empty() && focused_input_path_ != autofocus_path_) {
+        focused_input_path_ = autofocus_path_;
+    }
+}
+
+void Host::handle_contextmenu(int screen_x, int screen_y) noexcept {    if (hwnd_ == nullptr || !context_menu_handler_) return;
+    POINT pt{screen_x, screen_y};
+    ScreenToClient(hwnd_, &pt);
+    context_menu_handler_(to_logical_px(pt.x), to_logical_px(pt.y));
+}
+
 void Host::handle_key_down(WPARAM vk) noexcept {
     if (tree_ == nullptr) return;
+
+    // App key hook first (command palette Ctrl+K and friends).
+    if (key_hook_ && key_hook_(static_cast<unsigned>(vk))) return;
 
     // Esc closes the topmost overlay: its root's on_click is the dismiss
     // semantics (scrim click and Esc share one handler).
@@ -898,6 +942,16 @@ void Host::handle_key_down(WPARAM vk) noexcept {
                 default: break;
                 }
             }
+        }
+    }
+
+    // Focused element's own key handler (arrows/Enter/Esc for lists and
+    // the command palette) — before the generic Tab/Space machinery.
+    if (!focus_path_.empty()) {
+        if (const Element* fe = resolve(focus_path_);
+            fe != nullptr && fe->props.on_key && fe->props.enabled) {
+            fe->props.on_key(static_cast<unsigned>(vk));
+            return;
         }
     }
 
@@ -1025,6 +1079,7 @@ void Host::paint_frame() noexcept {
         for (auto& ov : frame_overlays_) {
             if (ov != nullptr) flex_layout(*ov, logical_w, logical_h, ctx);
         }
+        apply_autofocus();
     }
 
 #ifdef _DEBUG
