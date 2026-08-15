@@ -707,6 +707,18 @@ void Host::handle_mouse_move(int px, int py) noexcept {
             const float t = std::clamp((lx - e->x) / e->w, 0.0f, 1.0f);
             const float v = e->props.slider_min + t * (e->props.slider_max - e->props.slider_min);
             e->props.on_value_change(v);
+        } else if (const Element* dh = resolve(pressed_path_);
+                   dh != nullptr && dh->type == L"drag_handle" &&
+                   e->props.on_value_change && pressed_path_.size() >= 2) {
+            // Generic drag handle (splitter): normalized position inside the
+            // PARENT container maps to 0..1.
+            Path parent_path = pressed_path_;
+            parent_path.pop_back();
+            if (const Element* parent = resolve(parent_path);
+                parent != nullptr && parent->w > 0.0f) {
+                const float t = std::clamp((lx - parent->x) / parent->w, 0.0f, 1.0f);
+                dh->props.on_value_change(t);
+            }
         }
     }
 
@@ -770,10 +782,14 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
     Path new_focus;
     Path new_pressed;
     if (target != nullptr) {
-        // Walk up: an interactive ancestor owns the press (label inside button).
+        // Walk up: an interactive ancestor owns the press (label inside
+        // button). Drag handles (on_value_change, no on_click) are
+        // pressable too — the slider/drag_handle branches consume it.
         Path walk = path;
         while (!walk.empty()) {
-            if (const Element* e = resolve(walk); e != nullptr && e->props.on_click && e->props.enabled) {
+            if (const Element* e = resolve(walk);
+                e != nullptr && e->props.enabled &&
+                (e->props.on_click || e->props.on_value_change)) {
                 new_pressed = walk;
                 new_focus = walk;
                 break;
@@ -801,6 +817,18 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
             const float t = std::clamp((lx - e->x) / e->w, 0.0f, 1.0f);
             const float v = e->props.slider_min + t * (e->props.slider_max - e->props.slider_min);
             e->props.on_value_change(v);
+        } else if (const Element* dh = resolve(new_pressed);
+                   dh != nullptr && dh->type == L"drag_handle" &&
+                   e->props.on_value_change && new_pressed.size() >= 2) {
+            // A drag_handle press immediately reports the normalized
+            // position inside its parent (splitter jump-to).
+            Path parent_path = new_pressed;
+            parent_path.pop_back();
+            if (const Element* parent = resolve(parent_path);
+                parent != nullptr && parent->w > 0.0f) {
+                dh->props.on_value_change(
+                    std::clamp((lx - parent->x) / parent->w, 0.0f, 1.0f));
+            }
         }
     }
     // Background click clears focus (target == nullptr OR no interactive

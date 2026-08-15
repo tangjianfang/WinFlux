@@ -192,4 +192,34 @@ struct CommandHost {
 void overlay_command_palette(Host&, CommandHost&, const Palette&,
                              std::vector<CommandItem> items) noexcept;
 
+// ---- Layout containers --------------------------------------------------------
+
+// Two panes split by a draggable handle. `ratio` (0.05..0.95) is pane a's
+// share of the main axis; drag reports the new ratio through on_ratio.
+[[nodiscard]] ElementPtr splitter(const Palette& pal, ElementPtr a, ElementPtr b,
+                                  float ratio, std::function<void(float)> on_ratio,
+                                  bool vertical = false);
+
+struct DrawerHost {
+    bool open = false;
+    Animated<float> slide{0.0f};
+    float width = 320.0f;
+};
+
+void drawer_open(DrawerHost&) noexcept;
+void drawer_close(DrawerHost&) noexcept;
+// Right-edge slide-in panel (ease_out in / ease_in-out out). Stays
+// declared while the closing tween is still in flight.
+void overlay_drawer(Host&, DrawerHost&, const Palette&, ElementPtr content) noexcept;
+
+struct NavEntry {
+    std::wstring label;
+    IconKind icon = IconKind::chevron_right;
+};
+
+// Collapsible icon rail: entries keep tooltips when collapsed.
+[[nodiscard]] ElementPtr sidenav(const Palette& pal, std::vector<NavEntry> entries,
+                                 int active, std::function<void(int)> on_change,
+                                 bool collapsed, std::function<void()> on_toggle);
+
 } // namespace flux::ui

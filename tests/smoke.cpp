@@ -406,6 +406,50 @@ void test_menus() {
     }
 }
 
+void test_layout_components() {
+    const Palette pal = palette(ThemeMode::light);
+
+    // Splitter: [a, drag_handle, b] with grow ratios; handle reports 0..1.
+    {
+        float got = -1.0f;
+        auto sp = ui::splitter(pal, view(), view(), 0.5f, [&](float t) { got = t; });
+        expect(sp->children.size() == 3, "splitter is pane/handle/pane");
+        expect(near_eq(sp->children[0]->props.flex_grow, 0.5f) &&
+               near_eq(sp->children[2]->props.flex_grow, 0.5f),
+               "splitter grow ratios split 50/50");
+        const Element& handle = *sp->children[1];
+        expect(handle.type == L"drag_handle" && handle.props.on_value_change != nullptr,
+               "splitter handle is a drag_handle with a value callback");
+        handle.props.on_value_change(0.75f);
+        expect(near_eq(got, 0.75f), "drag_handle reports the ratio");
+    }
+
+    // Sidenav: toggle + entries; collapsed hides labels but keeps tooltips.
+    {
+        int picked = -1;
+        auto nav = ui::sidenav(
+            pal,
+            {ui::NavEntry{L"Home", IconKind::inbox}, ui::NavEntry{L"Settings", IconKind::hamburger}},
+            0, [&](int i) { picked = i; }, true, [] {});
+        // toggle + 2 entries
+        expect(nav->children.size() == 3, "sidenav = toggle + entries");
+        expect(nav->children[1]->props.tooltip_text == L"Home",
+               "collapsed sidenav keeps entry tooltips");
+        expect(nav->children[2]->props.on_click != nullptr, "entries are clickable");
+        nav->children[2]->props.on_click();
+        expect(picked == 1, "sidenav entry callback carries its index");
+    }
+
+    // Drawer slide math is an Animated<float>: open tweens toward 1.
+    {
+        ui::DrawerHost dh;
+        ui::drawer_open(dh);
+        expect(dh.open && dh.slide.target() == 1.0f, "drawer_open targets slide=1");
+        ui::drawer_close(dh);
+        expect(!dh.open && dh.slide.target() == 0.0f, "drawer_close targets slide=0");
+    }
+}
+
 void test_charts() {
     // value_range pads flat series so the line sits mid-box.
     {
@@ -787,6 +831,7 @@ int main() {
     test_overlay_anchoring();
     test_components();
     test_menus();
+    test_layout_components();
     test_charts();
     test_builders();
     test_layout_row_grow();
