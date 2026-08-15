@@ -3,6 +3,8 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 #include <flux/FlexLayout.hpp>
 #include <flux/flux.hpp>
@@ -159,9 +161,10 @@ struct PaintScope {
     PaintScope& operator=(const PaintScope&) = delete;
 };
 
-#ifdef _DEBUG
-// Inline QueryPerformanceCounter helper; one source for the cast so the
-// rest of the code reads as `qpc()` -> long long.
+// Inline QueryPerformanceCounter helpers; one source for the cast so the
+// rest of the code reads as `qpc()` -> long long. Compiled in ALL configs:
+// measurement is a handful of QPC calls, and WINFLUX_PERF_LOG needs it in
+// release builds (where the numbers are honest).
 inline long long qpc() noexcept {
     LARGE_INTEGER t{};
     QueryPerformanceCounter(&t);
@@ -171,7 +174,6 @@ inline double qpc_to_ms(long long freq, long long delta) noexcept {
     return freq > 0 ? (static_cast<double>(delta) * 1000.0 / static_cast<double>(freq))
                     : 0.0;
 }
-#endif
 } // namespace
 
 LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept {
@@ -1123,23 +1125,19 @@ void Host::paint_frame() noexcept {
     // every visible overlay each frame (declarative lifetime).
     frame_overlays_.clear();
 
-#ifdef _DEBUG
     if (qpc_freq_ == 0) {
         LARGE_INTEGER f{};
         QueryPerformanceFrequency(&f);
         qpc_freq_ = f.QuadPart;
     }
     const long long t_frame_start = qpc();
-#endif
 
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     const float logical_w = to_logical_px(rc.right - rc.left);
     const float logical_h = to_logical_px(rc.bottom - rc.top);
 
-#ifdef _DEBUG
     const long long t_after_rect = qpc();
-#endif
 
     // Rebuild the scene tree (React re-render).
     tree_ = root_builder_ ? root_builder_() : nullptr;
@@ -1182,9 +1180,7 @@ void Host::paint_frame() noexcept {
         apply_autofocus();
     }
 
-#ifdef _DEBUG
     const long long t_after_layout = qpc();
-#endif
 
     // Compute damage. resize / DPI change / any in-flight animation (theme
     // fade or an animate_for tween) force a fullscreen update; otherwise
@@ -1245,9 +1241,7 @@ void Host::paint_frame() noexcept {
     }
     force_full_dirty_ = false;
 
-#ifdef _DEBUG
     const long long t_after_damage = qpc();
-#endif
 
     if (dirty_rects.empty()) {
         // Nothing changed; the composition visual is already correct. Do NOT
@@ -1256,10 +1250,13 @@ void Host::paint_frame() noexcept {
         // advance last_painted_generation_ so the gen short-circuit above
         // catches subsequent stray WM_PAINTs without re-running the diff.
         last_painted_generation_ = dirty_generation_;
-#ifdef _DEBUG
+        // Counted as a SKIP: the pipeline ran but nothing drew. Averaged
+        // separately from drawn frames so partial-repaint stats stay honest.
+        ++skip_counter_;
         t_total_ += qpc() - t_frame_start;
-        if (++frame_counter_ >= kFrameTimingInterval) { log_frame_summary(); }
-#endif
+        if (frame_counter_ + skip_counter_ >= kFrameTimingInterval) {
+            log_frame_summary();
+        }
         return;
     }
 
@@ -1267,9 +1264,7 @@ void Host::paint_frame() noexcept {
     // BeginDraw can target the actual changed region. render_element prunes
     // subtrees whose bounds don't intersect the dirty rect, so a partial
     // repaint only visits the elements that actually need new pixels.
-#ifdef _DEBUG
     const long long t_before_draw = qpc();
-#endif
     for (const Rect& dr : dirty_rects) {
         renderer_.begin(shown_.background, &dr);
         if (tree_ != nullptr) render_element(*tree_, Path{}, dr);
@@ -1291,18 +1286,15 @@ void Host::paint_frame() noexcept {
     prev_focus_path_   = focus_path_;
     last_painted_generation_ = dirty_generation_;
 
-#ifdef _DEBUG
     const long long t_end = qpc();
-    t_total_   += t_end - t_frame_start;
-    t_builder_ += t_after_rect - t_frame_start;          // GetClientRect + tree build
+    t_total_   += t_end - t_frame_start;                   // GetClientRect + tree build
+    t_builder_ += t_after_rect - t_frame_start;
     t_layout_  += t_after_layout - t_after_rect;
     t_damage_  += t_after_damage - t_after_layout;
     t_draw_    += t_end - t_before_draw;
     if (++frame_counter_ >= kFrameTimingInterval) { log_frame_summary(); }
-#endif
 }
 
-#ifdef _DEBUG
 void Host::log_frame_summary() noexcept {
     // Per-frame averages in milliseconds. builder includes GetClientRect since
     // it's a cheap pre-pass and not separately useful.
@@ -1319,14 +1311,34 @@ void Host::log_frame_summary() noexcept {
 
     wchar_t buf[256];
     std::swprintf(buf, std::size(buf),
-                  L"[WinFlux] %u frames: total=%.3fms build=%.3f layout=%.3f damage=%.3f draw=%.3f\n",
+                  L"[WinFlux] %u frames: total=%.3fms build=%.3f layout=%.3f damage=%.3f draw=%.3f",
                   frame_counter_, avg_total, avg_build, avg_layout, avg_damage, avg_draw);
+    wchar_t tail[64];
+    std::swprintf(tail, std::size(tail), L" (%u skipped)",
+                  static_cast<unsigned>(skip_counter_));
+    wcsncat_s(buf, tail, _TRUNCATE);
+#ifdef _DEBUG
     OutputDebugStringW(buf);
+    OutputDebugStringW(L"\n");
+#endif
+    // WINFLUX_PERF_LOG=<path>: append the same summary for headless perf
+    // measurement (release builds included).
+    if (const char* path = perf_log_path()) {
+        if (FILE* f = std::fopen(path, "a")) {
+            std::fprintf(f, "%ls\n", buf);
+            std::fclose(f);
+        }
+    }
 
     t_total_ = t_builder_ = t_layout_ = t_damage_ = t_draw_ = 0;
     frame_counter_ = 0;
+    skip_counter_ = 0;
 }
-#endif
+
+const char* Host::perf_log_path() noexcept {
+    static const char* path = std::getenv("WINFLUX_PERF_LOG");
+    return (path != nullptr && path[0] != '\0') ? path : nullptr;
+}
 
 void Host::render_element(const Element& e, const Path& path, const Rect& clip) noexcept {
     const Props& p = e.props;

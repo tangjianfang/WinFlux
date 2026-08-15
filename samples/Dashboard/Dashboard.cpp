@@ -259,6 +259,9 @@ ElementPtr build(App& app) {
                                 static_cast<float>(tokens::spacing_lg),
                                 static_cast<float>(tokens::spacing_lg)};
     page_p.flex_grow = 1.0f;
+    // Stretch: without it the column's cross axis (width) defaults to each
+    // child's measured width — and a width-less scroll_view measures 0.
+    page_p.align = Align::stretch;
     auto page = view(std::move(page_p));
 
     // Header: title + Ctrl+K hint.
@@ -329,11 +332,20 @@ ElementPtr build(App& app) {
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     enable_per_monitor_dpi_v2();
 
+    // Optional initial page from the command line (0..4; e.g.
+    // `WinFluxDashboard.exe 2` opens on Logs) — screenshot/perf harnesses
+    // use this instead of synthetic clicks.
+    int initial_page = 0;
+    if (cmd_line != nullptr && *cmd_line != L'\0') {
+        const int parsed = std::wcstol(cmd_line, nullptr, 10);
+        if (parsed >= 0 && parsed <= 4) initial_page = parsed;
+    }
+
     App app;
-    app.nav            = app.host.make_state<int>(0);
+    app.nav            = app.host.make_state<int>(initial_page);
     app.nav_collapsed  = app.host.make_state<bool>(false);
     app.sort_col       = app.host.make_state<int>(0);
     app.sort_asc       = app.host.make_state<bool>(true);

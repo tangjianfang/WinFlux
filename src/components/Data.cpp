@@ -207,6 +207,16 @@ ElementPtr virtual_list(const Palette& pal, int total_rows, float row_h,
     for (int i = vis.first; i < vis.first + vis.count; ++i) {
         if (ElementPtr row = make_row(i)) col->children.push_back(std::move(row));
     }
+    // Trailing spacer: without it the content measures only ~one viewport
+    // tall, the scroll_view never sees an overflow, and the wheel does
+    // nothing. It carries (total - first - count) rows so the scrollbar
+    // maps to the full row range.
+    const int trailing = total_rows - vis.first - vis.count;
+    if (trailing > 0) {
+        Props trail_p;
+        trail_p.height = static_cast<float>(trailing) * row_h;
+        col->children.push_back(view(std::move(trail_p)));
+    }
     (void)pal;
     return col;
 }

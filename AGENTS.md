@@ -8,6 +8,11 @@ reverse-engineer build presets, module boundaries, or the design contract.
 
 ## Build & test
 
+Performance logging: set `WINFLUX_PERF_LOG=<path>` before launching any
+sample — every 120 frames a one-line per-phase summary (build/layout/
+damage/draw, drawn vs skipped) appends to that file. Release binaries
+included; debug builds also mirror it to the debugger.
+
 CMakePresets drive everything; pick the configuration explicitly:
 
 ```sh

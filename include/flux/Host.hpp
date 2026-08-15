@@ -286,22 +286,23 @@ private:
     static constexpr UINT_PTR anim_timer_id_ = 1;   // was fade_timer_id_
     static constexpr unsigned int anim_tick_ms_ = 16;   // ~60 fps tween steps
 
-#ifdef _DEBUG
-    // ---- Frame-timing instrumentation (debug builds only) -----------------
-    // Per-phase QueryPerformanceCounter deltas + rolling frame counter; every
-    // kFrameTimingInterval frames we emit a one-line summary to the debugger
-    // so a frame-time regression shows up without attaching a profiler. The
-    // members are #ifdef'd out in release so there is no overhead.
+    // ---- Frame-timing instrumentation ------------------------------------
+    // Per-phase QueryPerformanceCounter deltas + rolling frame counter. In
+    // debug builds a one-line summary goes to the debugger every
+    // kFrameTimingInterval frames; in ANY build, setting WINFLUX_PERF_LOG to
+    // a file path appends the same summary there (perf measurement without
+    // attaching a profiler). Zero cost when the env var is unset.
+    static constexpr unsigned kFrameTimingInterval = 120;   // ~2s @60fps
+    void log_frame_summary() noexcept;
+    [[nodiscard]] static const char* perf_log_path() noexcept;
     long long qpc_freq_ = 0;
-    unsigned frame_counter_ = 0;
+    unsigned frame_counter_ = 0;   // frames that reached the draw
+    unsigned skip_counter_ = 0;    // pipeline ran, damage empty, nothing drew
     long long t_total_ = 0;
     long long t_builder_ = 0;
     long long t_layout_ = 0;
     long long t_damage_ = 0;
     long long t_draw_ = 0;
-    static constexpr unsigned kFrameTimingInterval = 120;   // ~2s @60fps
-    void log_frame_summary() noexcept;
-#endif
 };
 
 } // namespace flux

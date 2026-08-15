@@ -364,6 +364,12 @@ std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
 
     Microsoft::WRL::ComPtr<IDWriteTextLayout>& slot = text_layouts_[key];
     if (slot == nullptr) {
+        // Bound the cache: data-driven text (timestamps, per-row values)
+        // would otherwise grow the map without limit. A coarse clear-when-
+        // huge policy is fine — the common strings repopulate within a
+        // frame or two.
+        constexpr size_t kMaxCachedLayouts = 4096;
+        if (text_layouts_.size() >= kMaxCachedLayouts) text_layouts_.clear();
         // Unbounded width layout: the measured extent is the natural text size.
         const HRESULT hr = dwrite_->CreateTextLayout(
             text.c_str(), static_cast<UINT32>(text.size()), fmt,
