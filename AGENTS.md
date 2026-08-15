@@ -27,8 +27,8 @@ Two CTest targets, intentionally split (see `tests/`):
 
 | Target                     | What it covers                                                                                       |
 |----------------------------|------------------------------------------------------------------------------------------------------|
-| `WinFluxSmokeTest`         | Pure CPU: theme tokens, element builders, flex layout, **DamageTracker** diff (4 spec cases).        |
-| `WinFluxHostLifecycleTest` | Creates a real HWND, exercises Host lifecycle, presenter selection, and a paint round-trip.         |
+| `WinFluxSmokeTest`         | Pure CPU: theme tokens, element builders, flex layout, **DamageTracker** diff, animation, scroll layout, overlay anchoring, flux::ui components, chart/tree/menu math. |
+| `WinFluxHostLifecycleTest` | Creates a real HWND, exercises Host lifecycle, presenter selection, and paint round-trips (incl. scroll_view + overlay). |
 
 Headless core checks always run in CI; the lifecycle target is gated behind
 a window session (ctest still runs it — failure is isolated from smoke).
@@ -39,12 +39,24 @@ a window session (ctest still runs it — failure is isolated from smoke).
 |-----------------|----------------------------------------------------|------------------------------------------|
 | Theme           | `include/flux/Theme.hpp`                           | `src/theme/Theme.cpp`                    |
 | Element model   | `include/flux/Element.hpp`                         | (inline builders in `src/core/Host.cpp`) |
+| Animation       | `include/flux/Animation.hpp`                       | (header-only: `Animated<T>`, curves)     |
 | Flex layout     | `include/flux/FlexLayout.hpp`                      | `src/layout/FlexLayout.cpp`              |
 | Presentation    | `include/flux/Presenter.hpp`, `DCompPresenter.hpp`, `HwndPresenter.hpp` | `src/render/DCompPresenter.cpp`, `HwndPresenter.cpp` |
 | Rendering       | `include/flux/D2DRenderer.hpp`                     | `src/render/D2DRenderer.cpp`             |
 | Damage          | `include/flux/Damage.hpp`                          | `src/render/Damage.cpp`                  |
 | Host (window)   | `include/flux/Host.hpp`                            | `src/core/Host.cpp`                      |
+| Components      | `include/flux/Components.hpp` (`flux::ui`)         | `src/components/*.cpp`                   |
 | Platform glue   | `include/flux/flux.hpp`                            | `src/platform/AppHost.cpp`               |
+
+The `flux::ui` component library layers on the primitives: navigation
+(tabs/segmented/pagination/accordion/sidenav), feedback (alert/badge,
+ToastHost/ModalHost overlays, host-native tooltip), selection & menus
+(select/context menu/Ctrl+K command palette), layout containers
+(splitter/drawer), data display (sortable table/tree view/virtualized
+list), charts (line/area/pie/sparkline/gauge), and pickers (radio/colour/
+date/calendar). Overlay components follow the "app-side host struct +
+declaration from the root builder every frame" pattern — see
+`samples/Dashboard/Dashboard.cpp` for a complete app assembled from them.
 
 The Host owns the `DCompPresenter` (with `HwndPresenter` fallback) and a
 `D2DRenderer` attached to whichever presenter is live. The renderer never

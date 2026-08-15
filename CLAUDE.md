@@ -132,3 +132,26 @@ A new type touches several files at once:
 - Root-level `*.ps1` files are untracked scratch from a screenshot pixel-diffing session (they
   read PNGs from a temp dir). They are not build inputs and not referenced by CMake.
 - `.qoder/` is generated tooling output, also untracked.
+- `.visual-test/` is untracked visual-verification scratch (PrintWindow capture / PostMessage
+  input helper scripts + screenshots).
+
+## Component library (`flux::ui`)
+
+Reusable components live in `include/flux/Components.hpp` + `src/components/` (navigation,
+overlay feedback, menus, layout containers, data display, charts, pickers). Two contracts:
+
+- **Pure builders** take spec + state and return `ElementPtr` + callbacks (like the primitives).
+- **Overlay components** pair an app-side host struct (`ToastHost`/`ModalHost`/`MenuHost`/
+  `SelectHost`/`CommandHost`/`DrawerHost`) with a `overlay_*(host, ...)` function called from
+  the ROOT BUILDER every frame while the overlay should show. Show/close mutate the host from
+  handlers; `Host::overlay()` collects roots each frame. Esc / click-outside close via the
+  overlay root's `on_click`.
+
+Framework escape hatches worth knowing: `Props::paint` + `paint_id` (arbitrary drawing, e.g.
+charts — derive the id from the data so the damage diff still works), `Props::on_key`
+(focused-element keys), `Props::on_scroll` (scroll_view offset → virtualized lists),
+`Props::autofocus`, `Props::tooltip_text` (host-native hover hint), the `drag_handle` element
+type (generic splitter drag), and `Host::set_key_hook` / `set_context_menu_handler`.
+
+Samples: `WinFluxGallery` (every component + primitives) and `WinFluxDashboard` (a realistic
+app built only from `flux::ui`).
