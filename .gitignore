@@ -17,3 +17,6 @@ Thumbs.db
 
 # Scratch pixel-diffing scripts
 /*.ps1
+
+# Visual-test scratch (screenshots, helper scripts)
+.visual-test/

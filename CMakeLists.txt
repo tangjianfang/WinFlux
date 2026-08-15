@@ -43,6 +43,12 @@ add_executable(WinFluxGallery WIN32 samples/Gallery/Gallery.cpp)
 target_link_libraries(WinFluxGallery PRIVATE WinFlux::flux)
 flux_apply_compiler_options(WinFluxGallery)
 
+# Round 5 dogfooding target: a realistic workbench built only from
+# flux::ui components — proves the library composes into real apps.
+add_executable(WinFluxDashboard WIN32 samples/Dashboard/Dashboard.cpp)
+target_link_libraries(WinFluxDashboard PRIVATE WinFlux::flux)
+flux_apply_compiler_options(WinFluxDashboard)
+
 enable_testing()
 add_executable(WinFluxSmokeTest tests/smoke.cpp)
 target_link_libraries(WinFluxSmokeTest PRIVATE WinFlux::flux)
