@@ -554,6 +554,85 @@ void test_multiline_text() {
            "text_ellipsis change is paint-dirty");
 }
 
+void test_round7() {
+    const Palette pal = palette(ThemeMode::light);
+
+    // nearest_index: normalized x -> closest series point.
+    {
+        const std::vector<float> v{0.0f, 10.0f, 20.0f, 30.0f, 40.0f};
+        expect(ui::nearest_index(v, 0.0f) == 0, "nearest at start");
+        expect(ui::nearest_index(v, 1.0f) == 4, "nearest at end");
+        expect(ui::nearest_index(v, 0.5f) == 2, "nearest at middle");
+        expect(ui::nearest_index(v, 0.35f) == 1, "nearest rounds to index");
+        expect(ui::nearest_index(v, -1.0f) == 0 && ui::nearest_index(v, 9.0f) == 4,
+               "nearest clamps out-of-range t");
+        expect(ui::nearest_index({}, 0.5f) == 0, "empty series -> 0");
+    }
+
+    // radar_points: axis 0 points up; unit values sit on the ring.
+    {
+        const auto pts = ui::radar_points({1.0f, 1.0f, 1.0f, 1.0f}, 100.0f, 100.0f, 50.0f);
+        expect(pts.size() == 4, "one point per axis");
+        expect(near_eq(pts[0].first, 100.0f) && near_eq(pts[0].second, 50.0f),
+               "axis 0 points up");
+        expect(near_eq(pts[1].first, 150.0f) && near_eq(pts[1].second, 100.0f),
+               "axis 1 points right (clockwise)");
+        expect(near_eq(pts[2].first, 100.0f) && near_eq(pts[2].second, 150.0f),
+               "axis 2 points down");
+        const auto half = ui::radar_points({0.5f}, 100.0f, 100.0f, 50.0f);
+        expect(near_eq(half[0].second, 75.0f), "value scales the radius");
+    }
+
+    // scatter_map: corners and mid; degenerate range maps to mid.
+    {
+        const auto tl = ui::scatter_map(0.0f, 1.0f, 0.0f, 0.0f, 100.0f, 50.0f,
+                                        0.0f, 1.0f, 0.0f, 1.0f);
+        expect(near_eq(tl.first, 0.0f) && near_eq(tl.second, 0.0f), "min-x max-y -> top-left");
+        const auto br = ui::scatter_map(1.0f, 0.0f, 0.0f, 0.0f, 100.0f, 50.0f,
+                                        0.0f, 1.0f, 0.0f, 1.0f);
+        expect(near_eq(br.first, 100.0f) && near_eq(br.second, 50.0f),
+               "max-x min-y -> bottom-right");
+        const auto mid = ui::scatter_map(42.0f, 7.0f, 0.0f, 0.0f, 100.0f, 50.0f,
+                                         5.0f, 5.0f, 3.0f, 3.0f);
+        expect(near_eq(mid.first, 50.0f) && near_eq(mid.second, 25.0f),
+               "degenerate range maps to mid");
+    }
+
+    // Validators.
+    {
+        expect(!ui::validate_not_empty(L"x", L"req").empty() == false,
+               "non-empty passes not_empty");
+        expect(!ui::validate_not_empty(L"   ", L"req").empty(), "whitespace fails not_empty");
+        expect(ui::validate_not_empty(L"", L"req") == L"req", "empty returns the message");
+        expect(ui::validate_email(L"a@b.io", L"bad").empty(), "valid email passes");
+        expect(!ui::validate_email(L"no-at-sign", L"bad").empty(), "missing @ fails");
+        expect(!ui::validate_email(L"a@nodot", L"bad").empty(), "missing tld dot fails");
+        expect(!ui::validate_email(L"a b@c.io", L"bad").empty(), "space in local part fails");
+    }
+
+    // field structure + input_error participates in the paint diff.
+    {
+        auto f_ok = ui::field(pal, L"Name", label(L"x"));
+        auto f_err = ui::field(pal, L"Name", label(L"x"), L"Required");
+        expect(f_ok->children.size() == 2 && f_err->children.size() == 3,
+               "field grows a child when an error text is present");
+        Element base = *view();
+        Element v = base;
+        v.props.input_error = true;
+        expect(!DamageTracker::paint_props_equal(base.props, v.props),
+               "input_error change is paint-dirty");
+    }
+
+    // New chart components install painters.
+    {
+        auto radar = ui::radar_chart(pal, {L"A", L"B", L"C"},
+                                     {{1.0f, 2.0f, 3.0f}, {3.0f, 2.0f, 1.0f}});
+        expect(radar->props.paint != nullptr, "radar_chart installs a painter");
+        auto scat = ui::scatter_chart(pal, {{0.0f, 0.0f}, {1.0f, 1.0f}, {0.5f, 0.2f}});
+        expect(scat->props.paint != nullptr, "scatter_chart installs a painter");
+    }
+}
+
 void test_charts() {
     // value_range pads flat series so the line sits mid-box.
     {
@@ -939,6 +1018,7 @@ int main() {
     test_data_components();
     test_pickers_math();
     test_multiline_text();
+    test_round7();
     test_charts();
     test_builders();
     test_layout_row_grow();

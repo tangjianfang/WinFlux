@@ -26,6 +26,9 @@ struct App {
     // Phase A form primitives
     State<std::wstring> input_name;
     State<std::wstring> input_email;
+    // Round 7 form-validation demo state.
+    State<std::wstring> form_name;
+    State<std::wstring> form_email;
     State<float> volume;
     State<bool> dark_mode;
     // Phase B pickers
@@ -1780,10 +1783,38 @@ void declare_layer_overlays(App& app) {
 // splitter, sortable table, tree, select/menu/palette triggers, drawer,
 // and a 1000-row virtualized list.
 
+// Round 7 form-validation demo: live validators + error captions.
+ElementPtr form_demo(App& app) {
+    const Palette& pal = app.host.palette();
+    const std::wstring name_err =
+        ui::validate_not_empty(app.form_name.get(), L"Name is required");
+    const std::wstring email_err =
+        ui::validate_email(app.form_email.get(), L"Enter a valid email address");
+
+    Props name_p;
+    name_p.input_error = !name_err.empty();
+    Props email_p;
+    email_p.input_error = !email_err.empty();
+
+    auto form = row_view({
+        ui::field(pal, L"Name",
+                  text_input(app.form_name.get(),
+                             [&app](std::wstring v) { app.form_name.set(std::move(v)); },
+                             std::move(name_p)),
+                  name_err),
+        ui::field(pal, L"Email",
+                  text_input(app.form_email.get(),
+                             [&app](std::wstring v) { app.form_email.set(std::move(v)); },
+                             std::move(email_p)),
+                  email_err),
+    }, static_cast<float>(tokens::spacing_md), Align::start);
+    return section_card(L"Form validation", std::move(form), pal);
+}
+
 ElementPtr components_section(App& app) {
     const Palette& pal = app.host.palette();
 
-    // 1) Charts wall.
+    // 1) Charts wall (line/area have hover crosshairs; bars have tooltips).
     auto charts = row_view({
         col_view({
             ui::area_chart(pal, {12, 30, 22, 44, 38, 55, 48, 62, 58, 70},
@@ -1791,6 +1822,15 @@ ElementPtr components_section(App& app) {
             row_view({
                 ui::sparkline(pal, {3, 8, 5, 9, 6, 10, 7}),
                 ui::sparkline(pal, {10, 7, 9, 4, 8, 5, 3}),
+            }, static_cast<float>(tokens::spacing_md), Align::center),
+        }, static_cast<float>(tokens::spacing_sm)),
+        col_view({
+            ui::line_chart(pal, {5, 9, 7, 12, 10, 15, 13}, Props{}),
+            row_view({
+                ui::radar_chart(pal, {L"CPU", L"MEM", L"IO", L"NET"},
+                                {{0.8f, 0.6f, 0.4f, 0.9f}, {0.3f, 0.7f, 0.8f, 0.5f}}),
+                ui::scatter_chart(pal, {{0.1f, 0.2f}, {0.3f, 0.6f}, {0.5f, 0.4f},
+                                        {0.7f, 0.9f}, {0.9f, 0.3f}, {0.4f, 0.8f}}),
             }, static_cast<float>(tokens::spacing_md), Align::center),
         }, static_cast<float>(tokens::spacing_sm)),
         ui::pie_chart(pal, {4, 3, 2, 1}, {L"Desktop", L"Mobile", L"Tablet", L"Other"}),
@@ -1915,6 +1955,7 @@ ElementPtr components_section(App& app) {
     auto body = col_view({
         charts,
         std::move(split),
+        form_demo(app),
         table,
         row_view({tree, col_view({std::move(triggers), label(ctx_hint_p.text, ctx_hint_p)},
                                  static_cast<float>(tokens::spacing_sm))},
@@ -2252,7 +2293,13 @@ ElementPtr build_body(App& app) {
         left_col = mk_col({});
         right_col = mk_col({});
         body->children.clear();
-        body->children.push_back(components_section(app));
+        {
+            Props sv_p;
+            sv_p.flex_grow = 1.0f;   // body row is stretch => full width
+            auto sv = scroll_view(nullptr, std::move(sv_p));
+            sv->children.push_back(components_section(app));
+            body->children.push_back(std::move(sv));
+        }
         return body;
     default:
         break;
@@ -2328,6 +2375,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.progress          = app.host.make_state<float>(0.35f);
     app.input_name = app.host.make_state<std::wstring>(L"");
     app.input_email = app.host.make_state<std::wstring>(L"");
+    app.form_name = app.host.make_state<std::wstring>(L"");
+    app.form_email = app.host.make_state<std::wstring>(L"");
     app.volume = app.host.make_state<float>(40.0f);
     app.dark_mode = app.host.make_state<bool>(false);
     app.theme_pick = app.host.make_state<int>(1);

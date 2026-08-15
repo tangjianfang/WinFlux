@@ -110,6 +110,20 @@ void modal_show(ModalHost&, std::wstring title, ElementPtr body,
 void modal_close(ModalHost&) noexcept;
 void overlay_modal(Host&, ModalHost&, const Palette&) noexcept;
 
+// ---- Form field + validators ---------------------------------------------------
+
+// Caption + input + (optional) red error caption column. Give the input
+// Props.input_error = !error_text.empty() for the danger border.
+[[nodiscard]] ElementPtr field(const Palette& pal, std::wstring caption,
+                               ElementPtr input, std::wstring error_text = {},
+                               Props p = {});
+
+// Return the message when invalid, empty when OK.
+[[nodiscard]] std::wstring validate_not_empty(
+    const std::wstring& value, std::wstring message) noexcept;
+[[nodiscard]] std::wstring validate_email(
+    const std::wstring& value, std::wstring message) noexcept;
+
 // ---- Charts ----------------------------------------------------------------
 // All charts draw through the Props::paint escape hatch; `paint_id`
 // derives from the series so unchanged charts keep the partial-repaint
@@ -121,6 +135,8 @@ struct PieSlice {
 };
 
 [[nodiscard]] std::pair<float, float> value_range(const std::vector<float>& values) noexcept;
+// Index of the nearest series point for a normalized x position (0..1).
+[[nodiscard]] size_t nearest_index(const std::vector<float>& values, float t) noexcept;
 [[nodiscard]] std::vector<std::pair<float, float>> line_points(
     const std::vector<float>& values, float x, float y, float w, float h) noexcept;
 [[nodiscard]] std::vector<PieSlice> pie_slices(const std::vector<float>& values) noexcept;
@@ -138,6 +154,21 @@ struct PieSlice {
                                    std::vector<std::wstring> labels, Props p = {});
 [[nodiscard]] ElementPtr gauge(const Palette& pal, float value /* 0..1 */,
                                std::wstring caption, Props p = {});
+
+// Radar (spider) chart: one polygon per series over the shared axes.
+[[nodiscard]] std::vector<std::pair<float, float>> radar_points(
+    const std::vector<float>& normalized, float cx, float cy, float r) noexcept;
+[[nodiscard]] ElementPtr radar_chart(const Palette& pal, std::vector<std::wstring> axes,
+                                     std::vector<std::vector<float>> series,
+                                     Props p = {});
+
+// Scatter plot: value pairs mapped into the plot rect (auto-ranged).
+[[nodiscard]] std::pair<float, float> scatter_map(
+    float vx, float vy, float x, float y, float w, float h, float xmin, float xmax,
+    float ymin, float ymax) noexcept;
+[[nodiscard]] ElementPtr scatter_chart(const Palette& pal,
+                                       std::vector<std::pair<float, float>> points,
+                                       Props p = {});
 
 // ---- Selection & menus ------------------------------------------------------
 

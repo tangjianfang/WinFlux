@@ -32,6 +32,7 @@ ElementPtr bar_chart(const Palette& pal, const std::vector<std::wstring>& labels
         col_p.align = Align::center;
         col_p.gap = 4.0f;
         col_p.flex_grow = 1.0f;
+        col_p.tooltip_text = labels[i] + L": " + std::to_wstring(static_cast<int>(v));
         auto col = view(std::move(col_p));
 
         Props val_p;

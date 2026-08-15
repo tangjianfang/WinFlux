@@ -241,4 +241,63 @@ void overlay_modal(Host& host, ModalHost& mh, const Palette& pal) noexcept {
     host.overlay(std::move(root));
 }
 
+// ---- Form field + validators -------------------------------------------------
+
+ElementPtr field(const Palette& pal, std::wstring caption, ElementPtr input,
+                 std::wstring error_text, Props p) {
+    Props col_p = std::move(p);
+    col_p.direction = Direction::column;
+    col_p.gap = static_cast<float>(tokens::spacing_xs);
+    col_p.align = Align::stretch;
+    auto col = view(std::move(col_p));
+
+    Props cap_p;
+    cap_p.text = caption;
+    cap_p.text_color = pal.text_secondary;
+    cap_p.font_size_pt = tokens::font_caption;
+    cap_p.text_align = Align::start;
+    col->children.push_back(label(caption, std::move(cap_p)));
+    if (input != nullptr) col->children.push_back(std::move(input));
+
+    if (!error_text.empty()) {
+        Props err_p;
+        err_p.text = error_text;
+        err_p.text_color = pal.danger;
+        err_p.font_size_pt = tokens::font_caption;
+        err_p.text_align = Align::start;
+        col->children.push_back(label(error_text, std::move(err_p)));
+    }
+    return col;
+}
+
+std::wstring validate_not_empty(const std::wstring& value,
+                                std::wstring message) noexcept {
+    // Non-placeholder check: any non-space character passes.
+    for (wchar_t c : value) {
+        if (c != L' ' && c != L'\t' && c != L'\n') return {};
+    }
+    return message;
+}
+
+std::wstring validate_email(const std::wstring& value,
+                            std::wstring message) noexcept {
+    // Pragmatic shape check: something@something.tld (no spaces, one @,
+    // a dot after it). Full RFC parsing is out of scope by design.
+    if (!validate_not_empty(value, message).empty()) return message;
+    const size_t at = value.find(L'@');
+    if (at == std::wstring::npos || at == 0 || at + 1 >= value.size()) return message;
+    const std::wstring domain = value.substr(at + 1);
+    if (domain.find(L'@') != std::wstring::npos) return message;
+    const size_t dot = domain.rfind(L'.');
+    if (dot == std::wstring::npos || dot == 0 || dot + 1 >= domain.size()) {
+        return message;
+    }
+    for (const auto& part : {value.substr(0, at), domain.substr(0, dot)}) {
+        for (wchar_t c : part) {
+            if (c == L' ' || c == L'\t') return message;
+        }
+    }
+    return {};
+}
+
 } // namespace flux::ui

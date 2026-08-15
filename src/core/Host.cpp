@@ -770,6 +770,18 @@ void Host::handle_mouse_move(int px, int py) noexcept {
         // encoded in the element tree; the damage diff is fed the OLD and NEW
         // paths in paint_frame so this becomes a partial repaint.
         request_render();
+        return;
+    }
+
+    // Unchanged hover target, but a paint-bearing element under the cursor
+    // renders pointer-dependent pixels (chart crosshairs): repaint while
+    // the pointer keeps moving. Parked cursors cost nothing.
+    for (Path walk = hover_path_; !walk.empty(); walk.pop_back()) {
+        if (const Element* e = resolve(walk);
+            e != nullptr && e->props.paint) {
+            request_render();
+            break;
+        }
     }
 }
 
@@ -1400,8 +1412,14 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
             renderer_.draw_round_rect(Rect{r.x + half, r.y + half, r.w - p.border_width, r.h - p.border_width},
                                       p.radius, *p.border_color, p.border_width, op);
         }
-        // Custom painter (charts, gauges): after the chrome, before children.
-        if (p.paint) p.paint(renderer_, r.x, r.y, r.w, r.h);
+        // Custom painter (charts, gauges): after the chrome, before
+        // children. The pointer position is element-relative so painters
+        // can render crosshairs/value bubbles without knowing layout.
+        if (p.paint) {
+            p.paint(renderer_, r.x, r.y, r.w, r.h, hovered,
+                    hovered ? last_mouse_lx_ - r.x : -1.0f,
+                    hovered ? last_mouse_ly_ - r.y : -1.0f);
+        }
     }
 
     // Typed-element glyphs.
@@ -1465,7 +1483,8 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const Color bg = is_focused && p.enabled ? pal.surface
                       : !p.enabled ? pal.surface_variant
                       : (p.background.value_or(pal.surface));
-        const Color border_c = is_focused && p.enabled ? pal.accent
+        const Color border_c = p.input_error && p.enabled ? pal.danger
+                            : is_focused && p.enabled ? pal.accent
                             : !p.enabled ? pal.divider
                             : (p.border_color.value_or(pal.border));
         renderer_.fill_round_rect(r, p.radius, bg, op);

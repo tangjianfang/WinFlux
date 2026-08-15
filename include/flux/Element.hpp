@@ -84,11 +84,15 @@ struct Props {
     std::optional<IconKind> icon;                  // icon element payload, or inline glyph on button/label
     // Escape hatch for compositions that need arbitrary drawing (charts,
     // gauges, ...). Called at render time with the element's laid-out rect
-    // (logical units) after background/border, before children. The diff
-    // can't compare callbacks — derive `paint_id` from the data the
+    // (logical units) after background/border, before children. Hovered
+    // context: `hovered` mirrors the element's hover state and mx/my are
+    // the pointer relative to the element's top-left (-1,-1 when not
+    // hovered) — the crosshair/value-bubble charts build on this. The
+    // diff can't compare callbacks — derive `paint_id` from the data the
     // callback draws (e.g. hash of the series) so unchanged charts keep
     // the partial-repaint fast path.
-    std::function<void(D2DRenderer&, float x, float y, float w, float h)> paint;
+    std::function<void(D2DRenderer&, float x, float y, float w, float h,
+                       bool hovered, float mx, float my)> paint;
     unsigned paint_id = 0;
 
     // Text
@@ -101,6 +105,7 @@ struct Props {
     bool text_wrap = false;        // wrap at the laid-out width (needs an
                                    // explicit width for correct measurement)
     bool text_ellipsis = false;    // trim overflow with "…"
+    bool input_error = false;      // text_input: danger border (validation)
 
     // Interaction
     ClickHandler on_click;
