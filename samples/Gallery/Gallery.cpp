@@ -70,6 +70,17 @@ struct App {
     Animated<Color> anim_color{rgb(59, 130, 246)};
     // Round 2 scroll & layer state.
     State<bool> layer_popup_open;
+    // Round 4 components demo state.
+    State<float> split_ratio;
+    State<int> table_sort_col;
+    State<bool> table_sort_asc;
+    State<int> table_selected_row;
+    State<std::set<std::vector<int>>> tree_expanded;
+    State<float> virt_offset;
+    ui::SelectHost select_host;
+    ui::MenuHost menu_host;
+    ui::CommandHost cmd_host;
+    ui::DrawerHost drawer_host;
 };
 
 EdgeInsets pad_all(float v) noexcept { return EdgeInsets{v, v, v, v}; }
@@ -1694,6 +1705,30 @@ void declare_layer_overlays(App& app) {
     const Palette& pal = host.palette();
     ui::overlay_modal(host, app.modal_host, pal);
     ui::overlay_toasts(host, app.toast_host, pal);
+    ui::overlay_select(host, app.select_host, pal,
+                       {L"Red", L"Green", L"Blue", L"Black", L"White"},
+                       [&app](int i) { app.select_host.selected = i; });
+    ui::overlay_menu(host, app.menu_host, pal);
+    ui::overlay_command_palette(host, app.cmd_host, pal,
+        {ui::CommandItem{L"Go to Form controls", [&app] { app.gallery_tab.set(0); }},
+         ui::CommandItem{L"Go to Components", [&app] { app.gallery_tab.set(8); }},
+         ui::CommandItem{L"Open drawer", [&app] { ui::drawer_open(app.drawer_host); }},
+         ui::CommandItem{L"Push toast",
+                         [&app] { ui::toast_show(app.toast_host, ui::ToastKind::success,
+                                                 L"From the command palette"); }},
+         ui::CommandItem{L"Toggle theme", [&app] {
+             app.host.set_theme_mode(app.host.theme_mode() == ThemeMode::light
+                                         ? ThemeMode::dark
+                                         : ThemeMode::light);
+         }}});
+    {
+        Props body_p;
+        body_p.text = L"Drawer content — slide-in panel with elevation 3.";
+        body_p.text_color = pal.text;
+        body_p.font_size_pt = tokens::font_body;
+        body_p.text_align = Align::start;
+        ui::overlay_drawer(host, app.drawer_host, pal, label(body_p.text, body_p));
+    }
 
     if (!app.layer_popup_open.get()) return;
     const auto [cx, cy] = host.last_click_pos();
@@ -1737,6 +1772,159 @@ void declare_layer_overlays(App& app) {
     host.overlay(std::move(root));
 }
 
+// ---- Round 4: Components wall ------------------------------------------------
+//
+// One page exercising every Round 4 flux::ui component: charts wall,
+// splitter, sortable table, tree, select/menu/palette triggers, drawer,
+// and a 1000-row virtualized list.
+
+ElementPtr components_section(App& app) {
+    const Palette& pal = app.host.palette();
+
+    // 1) Charts wall.
+    auto charts = row_view({
+        col_view({
+            ui::area_chart(pal, {12, 30, 22, 44, 38, 55, 48, 62, 58, 70},
+                          Props{}),
+            row_view({
+                ui::sparkline(pal, {3, 8, 5, 9, 6, 10, 7}),
+                ui::sparkline(pal, {10, 7, 9, 4, 8, 5, 3}),
+            }, static_cast<float>(tokens::spacing_md), Align::center),
+        }, static_cast<float>(tokens::spacing_sm)),
+        ui::pie_chart(pal, {4, 3, 2, 1}, {L"Desktop", L"Mobile", L"Tablet", L"Other"}),
+        ui::gauge(pal, 0.72f, L"CPU"),
+    }, static_cast<float>(tokens::spacing_lg), Align::start);
+
+    // 2) Splitter: two panels with a draggable divider.
+    auto pane = [&](const wchar_t* txt, Color bg) {
+        Props p;
+        p.background = bg;
+        p.radius = static_cast<float>(tokens::radius_md);
+        p.text = txt;
+        p.text_color = pal.text_secondary;
+        p.font_size_pt = tokens::font_caption;
+        p.text_align = Align::center;
+        return label(txt, p);
+    };
+    auto split = ui::splitter(pal,
+        pane(L"Pane A — drag the divider", pal.surface_variant),
+        pane(L"Pane B", pal.surface),
+        app.split_ratio.get(), [&app](float r) { app.split_ratio.set(r); });
+    Props split_wrap_p;
+    split_wrap_p.height = 120.0f;
+    split->props.padding = split_wrap_p.padding;   // no-op keep default
+    split->props.height = 120.0f;
+
+    // 3) Sortable + selectable table.
+    auto table = ui::data_table(pal, {L"Name", L"Status", L"Score"},
+        {{L"alpha", L"open", L"12"}, {L"bravo", L"closed", L"30"},
+         {L"charlie", L"open", L"7"}, {L"delta", L"pending", L"22"}},
+        app.table_sort_col.get(), app.table_sort_asc.get(),
+        [&app](int col) {
+            if (col == app.table_sort_col.get()) {
+                app.table_sort_asc.set(!app.table_sort_asc.get());
+            } else {
+                app.table_sort_col.set(col);
+                app.table_sort_asc.set(true);
+            }
+        },
+        app.table_selected_row.get(),
+        [&app](int r) { app.table_selected_row.set(r); });
+
+    // 4) Tree view.
+    auto tree = ui::tree_view(pal,
+        {ui::TreeItem{L"src", {{L"core", {{L"Host.cpp", {}}}},
+                               {L"render", {{L"D2DRenderer.cpp", {}}, {L"Damage.cpp", {}}}}}},
+         ui::TreeItem{L"include", {{L"flux", {{L"Host.hpp", {}}, {L"Theme.hpp", {}}}}}},
+         ui::TreeItem{L"CMakeLists.txt", {}}},
+        app.tree_expanded.get(),
+        [&app](std::vector<int> path) {
+            auto open = app.tree_expanded.get();
+            if (open.count(path) != 0) open.erase(path);
+            else open.insert(std::move(path));
+            app.tree_expanded.set(std::move(open));
+        },
+        nullptr);
+
+    // 5) Menu-ish triggers: select / menu / palette / drawer / context menu.
+    auto select_trigger = ui::select(pal, app.select_host,
+        {L"Red", L"Green", L"Blue", L"Black", L"White"}, nullptr,
+        [&app](bool open) {
+            app.select_host.open = open;
+            if (open) {
+                const auto [cx, cy] = app.host.last_click_pos();
+                app.select_host.ax = cx;
+                app.select_host.ay = cy;
+            }
+        });
+    auto triggers = row_view({
+        select_trigger,
+        button(L"Menu", [&app] {
+            const auto [cx, cy] = app.host.last_click_pos();
+            ui::menu_show_at(app.menu_host,
+                {ui::MenuItem{L"Refresh", [&app] {
+                     ui::toast_show(app.toast_host, ui::ToastKind::info, L"Refreshed");
+                 }},
+                 ui::MenuItem{L"-", nullptr},
+                 ui::MenuItem{L"About", [&app] {
+                     ui::toast_show(app.toast_host, ui::ToastKind::info, L"WinFlux demo");
+                 }}},
+                cx, cy);
+        }, button_secondary(pal)),
+        button(L"Command palette (Ctrl+K)", [&app] {
+            app.cmd_host.open = true;
+            app.cmd_host.query.clear();
+            app.cmd_host.selected = 0;
+            app.host.request_render();
+        }, button_secondary(pal)),
+        button(L"Drawer", [&app] { ui::drawer_open(app.drawer_host); },
+              button_secondary(pal)),
+    }, static_cast<float>(tokens::spacing_sm), Align::center);
+    Props ctx_hint_p;
+    ctx_hint_p.text = L"(right-click anywhere for the context menu)";
+    ctx_hint_p.text_color = pal.text_secondary;
+    ctx_hint_p.font_size_pt = tokens::font_caption;
+    ctx_hint_p.text_align = Align::start;
+
+    // 6) Virtualized list: 1000 rows, only the visible window is built.
+    Props sv_p;
+    sv_p.height = 240.0f;
+    sv_p.border_color = pal.border;
+    sv_p.border_width = 1.0f;
+    sv_p.radius = static_cast<float>(tokens::radius_md);
+    sv_p.on_scroll = [&app](float off) { app.virt_offset.set(off); };
+    auto virt = scroll_view(nullptr, std::move(sv_p));
+    virt->children.clear();
+    virt->children.push_back(ui::virtual_list(pal, 1000, 28.0f, 240.0f,
+        app.virt_offset.get(), [&](int i) {
+            Props rp;
+            rp.text = L"Virtual row " + std::to_wstring(i) +
+                      L" of 1000 — only the visible window exists";
+            rp.text_color = i % 2 == 0 ? pal.text : pal.text_secondary;
+            rp.font_size_pt = tokens::font_body;
+            rp.text_align = Align::start;
+            rp.height = 28.0f;
+            rp.padding = EdgeInsets{static_cast<float>(tokens::spacing_sm), 4.0f, 4.0f,
+                                    static_cast<float>(tokens::spacing_sm)};
+            rp.background = i % 2 ? std::optional<Color>{pal.surface_variant} : std::nullopt;
+            return label(rp.text, rp);
+        }));
+
+    auto body = col_view({
+        charts,
+        std::move(split),
+        table,
+        row_view({tree, col_view({std::move(triggers), label(ctx_hint_p.text, ctx_hint_p)},
+                                 static_cast<float>(tokens::spacing_sm))},
+                 static_cast<float>(tokens::spacing_md), Align::start),
+        std::move(virt),
+    }, static_cast<float>(tokens::spacing_md));
+    body->props.align = Align::stretch;
+    auto card = section_card(L"Components (Round 4)", std::move(body), pal);
+    card->props.flex_grow = 1.0f;
+    return card;
+}
+
 // ---- Root ------------------------------------------------------------------
 
 // Top-level category tab bar. A thin wrapper over segmented_control so the
@@ -1745,7 +1933,7 @@ ElementPtr tab_bar(App& app) {
     const Palette& pal = app.host.palette();
     return ui::segmented(pal,
         {L"Form controls", L"Pickers", L"Patterns", L"Overlays",
-         L"Data viz", L"Mini-apps", L"Motion", L"Scroll"},
+         L"Data viz", L"Mini-apps", L"Motion", L"Scroll", L"Components"},
         app.gallery_tab.get(),
         [&app](int i) { app.gallery_tab.set(i); });
 }
@@ -2058,6 +2246,12 @@ ElementPtr build_body(App& app) {
             body->children.push_back(std::move(sv));
         }
         return body;
+    case 8:   // Components — Round 4 wall (charts/splitter/table/tree/menus)
+        left_col = mk_col({});
+        right_col = mk_col({});
+        body->children.clear();
+        body->children.push_back(components_section(app));
+        return body;
     default:
         break;
     }
@@ -2156,7 +2350,40 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.cal_selected = app.host.make_state<int>(14);
     app.gallery_tab  = app.host.make_state<int>(initial_tab);
     app.layer_popup_open = app.host.make_state<bool>(false);
+    app.split_ratio      = app.host.make_state<float>(0.5f);
+    app.table_sort_col   = app.host.make_state<int>(0);
+    app.table_sort_asc   = app.host.make_state<bool>(true);
+    app.table_selected_row = app.host.make_state<int>(-1);
+    app.tree_expanded    = app.host.make_state<std::set<std::vector<int>>>(
+        std::set<std::vector<int>>{{0}, {0, 0}});
+    app.virt_offset      = app.host.make_state<float>(0.0f);
     app.host.set_root_builder([&app] { return build(app); });
+
+    // Ctrl+K opens the command palette; right-click opens the context menu.
+    app.host.set_key_hook([&app](unsigned vk) {
+        if (vk == 'K' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+            app.cmd_host.open = !app.cmd_host.open;
+            app.cmd_host.query.clear();
+            app.cmd_host.selected = 0;
+            app.host.request_render();
+            return true;
+        }
+        return false;
+    });
+    app.host.set_context_menu_handler([&app](float x, float y) {
+        ui::menu_show_at(app.menu_host,
+            {ui::MenuItem{L"Toggle theme", [&app] {
+                 app.host.set_theme_mode(app.host.theme_mode() == ThemeMode::light
+                                             ? ThemeMode::dark
+                                             : ThemeMode::light);
+             }},
+             ui::MenuItem{L"-", nullptr},
+             ui::MenuItem{L"Push toast", [&app] {
+                 ui::toast_show(app.toast_host, ui::ToastKind::info, L"Context menu toast");
+             }}},
+            x, y);
+        app.host.request_render();
+    });
 
     // Screenshot-driven verification seed: a trailing "seed" argument
     // pre-opens the modal + toast so captures need no synthetic input.
