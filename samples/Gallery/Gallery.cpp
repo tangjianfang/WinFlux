@@ -393,194 +393,6 @@ ElementPtr progress_section(App& app) {
 // infrastructure. Each child knows its own visual state (selected/not) at
 // build time.
 
-ElementPtr radio_option(const Palette& pal, const wchar_t* text, bool selected,
-                        ClickHandler on_select) {
-    Props row_p;
-    row_p.padding = EdgeInsets{static_cast<float>(tokens::spacing_xs),
-                               static_cast<float>(tokens::spacing_xs),
-                               static_cast<float>(tokens::spacing_xs),
-                               static_cast<float>(tokens::spacing_xs)};
-    row_p.gap = static_cast<float>(tokens::spacing_sm);
-    row_p.direction = Direction::row;
-    row_p.align = Align::center;
-    row_p.radius = static_cast<float>(tokens::radius_sm);
-    row_p.on_click = std::move(on_select);
-    auto row = view(std::move(row_p));
-
-    Props circle_p;
-    circle_p.width = 16.0f;
-    circle_p.height = 16.0f;
-    circle_p.radius = 8.0f;
-    circle_p.border_color = selected ? pal.accent : pal.border;
-    circle_p.border_width = 1.5f;
-    if (selected) circle_p.background = pal.accent;
-    row->children.push_back(view(std::move(circle_p)));
-
-    Props label_p;
-    label_p.text_color = pal.text;
-    label_p.font_size_pt = tokens::font_body;
-    label_p.text_align = Align::start;
-    row->children.push_back(label(std::wstring(text), std::move(label_p)));
-
-    return row;
-}
-
-ElementPtr radio_group(const Palette& pal, std::vector<std::wstring> options,
-                       int selected, std::function<void(int)> on_change) {
-    Props col_p;
-    col_p.gap = static_cast<float>(tokens::spacing_xs);
-    col_p.direction = Direction::column;
-    auto col = view(std::move(col_p));
-    for (size_t i = 0; i < options.size(); ++i) {
-        const int idx = static_cast<int>(i);
-        const bool is_sel = idx == selected;
-        auto handler = [on_change, idx] { if (on_change) on_change(idx); };
-        col->children.push_back(
-            radio_option(pal, options[i].c_str(), is_sel, std::move(handler)));
-    }
-    return col;
-}
-
-ElementPtr color_swatch(const Palette& pal, Color c, bool selected,
-                        ClickHandler on_select) {
-    Props p;
-    p.width = 36.0f;
-    p.height = 36.0f;
-    p.radius = static_cast<float>(tokens::radius_md);
-    p.background = c;
-    p.border_color = selected ? pal.accent : pal.border;
-    p.border_width = selected ? 2.5f : 1.0f;
-    p.on_click = std::move(on_select);
-    return view(std::move(p));
-}
-
-ElementPtr color_picker(const Palette& pal, std::vector<Color> swatches,
-                        int selected, std::function<void(int)> on_change,
-                        int per_row = 6) {
-    // Wrap-less grid: stack rows of `per_row` swatches. The framework has
-    // only row/column layouts, so manual row construction is the cleanest
-    // expression. per_row=6 gives a tidy 6-wide grid for typical palettes.
-    Props outer_p;
-    outer_p.gap = static_cast<float>(tokens::spacing_sm);
-    outer_p.direction = Direction::column;
-    auto outer = view(std::move(outer_p));
-    for (size_t i = 0; i < swatches.size(); i += static_cast<size_t>(per_row)) {
-        Props row_p;
-        row_p.gap = static_cast<float>(tokens::spacing_sm);
-        row_p.direction = Direction::row;
-        auto row = view(std::move(row_p));
-        for (size_t j = i; j < std::min(i + static_cast<size_t>(per_row), swatches.size()); ++j) {
-            const int idx = static_cast<int>(j);
-            auto handler = [on_change, idx] { if (on_change) on_change(idx); };
-            row->children.push_back(
-                color_swatch(pal, swatches[j], idx == selected, std::move(handler)));
-        }
-        outer->children.push_back(std::move(row));
-    }
-    return outer;
-}
-
-namespace {
-int days_in_month(int year, int month) {
-    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    if (month == 1) {   // February
-        const bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-        return leap ? 29 : 28;
-    }
-    return days[month];
-}
-int first_weekday(int year, int month) {
-    // Zeller's congruence — returns 0=Sunday..6=Saturday.
-    int m = month + 1;
-    int y = year;
-    if (m <= 2) { m += 12; y -= 1; }
-    const int k = y % 100;
-    const int j = y / 100;
-    int h = (1 + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-    return (h + 6) % 7;   // shift so 0=Sunday
-}
-} // namespace
-
-ElementPtr date_picker(const Palette& pal, int year, int month, int day,
-                       std::function<void(int, int, int)> on_change) {
-    Props outer_p;
-    outer_p.gap = static_cast<float>(tokens::spacing_xs);
-    outer_p.direction = Direction::column;
-    auto outer = view(std::move(outer_p));
-
-    // Month header: "September 2026"
-    static const wchar_t* month_names[] = {
-        L"January", L"February", L"March", L"April", L"May", L"June",
-        L"July", L"August", L"September", L"October", L"November", L"December"};
-    Props header_p;
-    header_p.text_color = pal.text;
-    header_p.font_size_pt = tokens::font_subtitle;
-    header_p.bold = true;
-    header_p.text_align = Align::start;
-    auto header_text = std::wstring(month_names[std::clamp(month, 0, 11)]) + L" " + std::to_wstring(year);
-    header_p.text = header_text;
-    outer->children.push_back(label(header_text, std::move(header_p)));
-
-    // Day-of-week header row.
-    static const wchar_t* dow[] = {L"S", L"M", L"T", L"W", L"T", L"F", L"S"};
-    Props dow_row_p;
-    dow_row_p.gap = static_cast<float>(tokens::spacing_xs);
-    dow_row_p.direction = Direction::row;
-    auto dow_row = view(std::move(dow_row_p));
-    for (int i = 0; i < 7; ++i) {
-        Props d;
-        d.width = 28.0f;
-        d.height = 22.0f;
-        d.text = dow[i];
-        d.text_color = pal.text_secondary;
-        d.font_size_pt = tokens::font_caption;
-        d.bold = true;
-        d.text_align = Align::center;
-        auto cell = label(dow[i], std::move(d));
-        dow_row->children.push_back(std::move(cell));
-    }
-    outer->children.push_back(std::move(dow_row));
-
-    // Day grid: 6 rows × 7 cols.
-    const int first = first_weekday(year, month);
-    const int total = days_in_month(year, month);
-    int cell_day = 1 - first;   // may be <= 0 (leading blanks)
-    for (int r = 0; r < 6; ++r) {
-        Props row_p;
-        row_p.gap = static_cast<float>(tokens::spacing_xs);
-        row_p.direction = Direction::row;
-        auto row = view(std::move(row_p));
-        for (int c = 0; c < 7; ++c, ++cell_day) {
-            Props cell_p;
-            cell_p.width = 28.0f;
-            cell_p.height = 28.0f;
-            cell_p.radius = static_cast<float>(tokens::radius_sm);
-            cell_p.text_align = Align::center;
-            cell_p.font_size_pt = tokens::font_caption;
-            const bool in_month = cell_day >= 1 && cell_day <= total;
-            if (!in_month) {
-                cell_p.text_color = pal.divider;
-                cell_p.text = L"";
-                cell_p.enabled = false;
-            } else {
-                cell_p.text = std::to_wstring(cell_day);
-                cell_p.text_color = cell_day == day ? pal.on_accent : pal.text;
-                cell_p.background = cell_day == day
-                                       ? std::optional<Color>{pal.accent}
-                                       : std::nullopt;
-                cell_p.enabled = true;
-                const int captured_day = cell_day;
-                cell_p.on_click = [year, month, captured_day, on_change] {
-                    if (on_change) on_change(year, month, captured_day);
-                };
-            }
-            row->children.push_back(label(cell_p.text, cell_p));
-        }
-        outer->children.push_back(std::move(row));
-    }
-    return outer;
-}
-
 // ---- Inputs (form primitives) ---------------------------------------------
 //
 // TextInput accepts text via WM_CHAR/VK_BACK dispatched to the element at
@@ -680,7 +492,7 @@ ElementPtr pickers_left_section(App& app) {
     const Palette& pal = app.host.palette();
 
     std::vector<std::wstring> theme_options = {L"Light", L"Dark", L"High contrast"};
-    auto theme_radio = radio_group(pal, theme_options, app.theme_pick.get(),
+    auto theme_radio = ui::radio_group(pal, theme_options, app.theme_pick.get(),
         [&app](int i) { app.theme_pick.set(i); });
 
     std::vector<Color> swatches = {
@@ -697,7 +509,7 @@ ElementPtr pickers_left_section(App& app) {
         rgb(255, 130, 60),    // peach
         rgb(100, 200, 200),   // sky
     };
-    auto swatch_picker = color_picker(pal, swatches, app.accent_pick.get(),
+    auto swatch_picker = ui::color_picker(pal, swatches, app.accent_pick.get(),
         [&app](int i) { app.accent_pick.set(i); });
 
     Props caption_p;
@@ -718,7 +530,7 @@ ElementPtr pickers_left_section(App& app) {
 ElementPtr pickers_right_section(App& app) {
     const Palette& pal = app.host.palette();
 
-    auto cal = date_picker(pal,
+    auto cal = ui::date_picker(pal,
         app.birthday_year.get(),
         app.birthday_month.get(),
         app.birthday_day.get(),
@@ -1961,365 +1773,6 @@ inline constexpr const wchar_t* kMonthNames[] = {
 // any cell updates app.cal_selected and (for prev/next month days) switches
 // the active month.
 
-ElementPtr calendar(App& app, const Palette& pal) {
-    const int year  = app.cal_year.get();
-    const int month = app.cal_month.get();
-    const int sel   = app.cal_selected.get();
-
-    const auto move_month = [&app](int delta) {
-        int m = app.cal_month.get() + delta;
-        int y = app.cal_year.get();
-        while (m < 0)  { m += 12; y -= 1; }
-        while (m > 11) { m -= 12; y += 1; }
-        app.cal_month.set(m);
-        app.cal_year.set(y);
-    };
-
-    // Header row: [◀]  [Month Year (flex_grow=1)]  [▶]
-    Props header_p;
-    header_p.direction = Direction::row;
-    header_p.align = Align::center;
-    header_p.gap = static_cast<float>(tokens::spacing_md);
-    header_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm)};
-    auto header = view(std::move(header_p));
-
-    Props prev_p = button_secondary(pal);
-    prev_p.text = L"◀";
-    prev_p.width = 28.0f;
-    prev_p.height = 28.0f;
-    prev_p.padding = EdgeInsets{0, 0, 0, 0};
-    {
-        auto mm = move_month;
-        prev_p.on_click = [mm] { mm(-1); };
-    }
-    header->children.push_back(button(L"◀", prev_p.on_click, std::move(prev_p)));
-
-    Props title_p;
-    title_p.text  = std::wstring(kMonthNames[month]) + L" " + std::to_wstring(year);
-    title_p.font_size_pt = tokens::font_subtitle;
-    title_p.text_color = pal.text;
-    title_p.text_align = Align::center;
-    title_p.flex_grow = 1.0f;
-    auto title_text = title_p.text;
-    header->children.push_back(label(title_text, std::move(title_p)));
-
-    Props next_p = button_secondary(pal);
-    next_p.text = L"▶";
-    next_p.width = 28.0f;
-    next_p.height = 28.0f;
-    next_p.padding = EdgeInsets{0, 0, 0, 0};
-    {
-        auto mm = move_month;
-        next_p.on_click = [mm] { mm(+1); };
-    }
-    header->children.push_back(button(L"▶", next_p.on_click, std::move(next_p)));
-
-    // Weekday labels row.
-    Props dow_p;
-    dow_p.direction = Direction::row;
-    dow_p.gap = static_cast<float>(tokens::spacing_xs);
-    dow_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_xs)};
-    auto dow_row = view(std::move(dow_p));
-    static const wchar_t* kDow[] = {L"S", L"M", L"T", L"W", L"T", L"F", L"S"};
-    for (int i = 0; i < 7; ++i) {
-        Props d;
-        d.text  = kDow[i];
-        d.text_color = pal.text_secondary;
-        d.font_size_pt = tokens::font_caption;
-        d.text_align = Align::center;
-        d.width = 32.0f;
-        d.height = 24.0f;
-        auto d_text = d.text;
-        dow_row->children.push_back(label(d_text, std::move(d)));
-    }
-
-    // Day grid: 6 weeks × 7 days. The first week may start with days from
-    // the previous month; the last week may end with days from the next.
-    Props grid_p;
-    grid_p.direction = Direction::column;
-    grid_p.gap = static_cast<float>(tokens::spacing_xs);
-    grid_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_xs),
-        static_cast<float>(tokens::spacing_xs)};
-    auto grid = view(std::move(grid_p));
-
-    const int first_dow = first_weekday(year, month);
-    const int dim = days_in_month(year, month);
-    const int prev_dim = days_in_month(month == 0 ? year - 1 : year,
-                                      month == 0 ? 11 : month - 1);
-
-    int day = 1 - first_dow;     // signed day-of-month counter
-    for (int week = 0; week < 6; ++week) {
-        Props row_p;
-        row_p.direction = Direction::row;
-        row_p.gap = static_cast<float>(tokens::spacing_xs);
-        auto row = view(std::move(row_p));
-        for (int col = 0; col < 7; ++col, ++day) {
-            const bool is_prev = (day < 1);
-            const bool is_next = (day > dim);
-            int display = day;
-            int midx = month;
-            if (is_prev) { display = prev_dim + day; midx = month == 0 ? 11 : month - 1; }
-            if (is_next) { display = day - dim;      midx = month == 11 ? 0 : month + 1; }
-
-            const bool is_sel = (midx == month && display == sel);
-            const bool is_today = (year == 2026 && month == 7 && display == 14);
-
-            Props cell_p;
-            cell_p.width  = 32.0f;
-            cell_p.height = 32.0f;
-            cell_p.radius = 16.0f;
-            cell_p.text = std::to_wstring(display);
-            cell_p.font_size_pt = tokens::font_caption;
-            cell_p.text_align = Align::center;
-            cell_p.text_color = is_prev || is_next ? pal.text_secondary : pal.text;
-            if (is_sel) {
-                cell_p.background = pal.accent;
-                cell_p.text_color = pal.on_accent;
-            } else if (is_today) {
-                cell_p.border_color = pal.accent;
-                cell_p.border_width = 1.0f;
-            }
-            cell_p.hover_background = is_sel ? std::optional<Color>{pal.accent_hover}
-                                             : std::optional<Color>{pal.surface_hover};
-            const int captured_day = display;
-            const int captured_midx = midx;
-            cell_p.on_click = [&app, captured_day, captured_midx] {
-                if (captured_midx >= 0 && captured_midx <= 11) {
-                    app.cal_month.set(captured_midx);
-                    app.cal_selected.set(captured_day);
-                }
-            };
-            // Extract text into a local first so it isn't read from a
-            // moved-from Props during the argument evaluation of label().
-            auto cell_text = cell_p.text;
-            row->children.push_back(label(cell_text, std::move(cell_p)));
-        }
-        grid->children.push_back(std::move(row));
-    }
-
-    Props cal_p;
-    cal_p.direction = Direction::column;
-    cal_p.gap = static_cast<float>(tokens::spacing_xs);
-    cal_p.background = pal.surface;
-    cal_p.border_color = pal.border;
-    cal_p.border_width = 1.0f;
-    cal_p.radius = static_cast<float>(tokens::radius_card);
-    cal_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm),
-        static_cast<float>(tokens::spacing_sm)};
-    auto cal = view(std::move(cal_p));
-    cal->children.push_back(std::move(header));
-    cal->children.push_back(std::move(dow_row));
-    cal->children.push_back(std::move(grid));
-    return cal;
-}
-
-// ---- Bar chart --------------------------------------------------------------
-//
-// One bar column per (label, value) pair. The bar height is proportional to
-// value / max_value; columns align at the bottom (the baseline) so the chart
-// "reads" naturally regardless of which bar is tallest.
-
-ElementPtr bar_chart(const Palette& pal,
-                     const std::vector<std::wstring>& labels,
-                     const std::vector<float>& values,
-                     float max_value) {
-    constexpr float kBarWidth      = 24.0f;
-    constexpr float kBarGap        = 8.0f;
-    constexpr float kMaxBarHeight  = 140.0f;
-
-    Props row_p;
-    row_p.direction = Direction::row;
-    row_p.gap = kBarGap;
-    row_p.align = Align::end;
-    row_p.flex_grow = 1.0f;
-    auto row = view(std::move(row_p));
-
-    for (size_t i = 0; i < labels.size(); ++i) {
-        const float v = values[i];
-        const float h = std::max(2.0f, (v / max_value) * kMaxBarHeight);
-
-        Props col_p;
-        col_p.direction = Direction::column;
-        col_p.align = Align::center;
-        col_p.gap = 4.0f;
-        col_p.flex_grow = 1.0f;
-        auto col = view(std::move(col_p));
-
-        // Value above the bar.
-        Props val_p;
-        val_p.text  = std::to_wstring(static_cast<int>(v));
-        val_p.font_size_pt = tokens::font_caption;
-        val_p.text_color = pal.text_secondary;
-        val_p.text_align = Align::center;
-        auto val_text = val_p.text;
-        col->children.push_back(label(val_text, std::move(val_p)));
-
-        // Spacer pushes the bar to the bottom of the column.
-        Props spacer_p;
-        spacer_p.height = kMaxBarHeight - h;
-        col->children.push_back(view(std::move(spacer_p)));
-
-        // Bar itself.
-        Props bar_p;
-        bar_p.background = pal.accent;
-        bar_p.width  = kBarWidth;
-        bar_p.height = h;
-        bar_p.radius = static_cast<float>(tokens::radius_sm);
-        col->children.push_back(view(std::move(bar_p)));
-
-        // Label below.
-        Props lab_p;
-        lab_p.text  = labels[i];
-        lab_p.font_size_pt = tokens::font_caption;
-        lab_p.text_color = pal.text;
-        lab_p.text_align = Align::center;
-        auto lab_text = lab_p.text;
-        col->children.push_back(label(lab_text, std::move(lab_p)));
-
-        row->children.push_back(std::move(col));
-    }
-
-    Props chart_p;
-    chart_p.padding = EdgeInsets{
-        static_cast<float>(tokens::spacing_md),
-        static_cast<float>(tokens::spacing_md),
-        static_cast<float>(tokens::spacing_md),
-        static_cast<float>(tokens::spacing_md)};
-    chart_p.align = Align::stretch;
-    auto chart = view(std::move(chart_p));
-    chart->children.push_back(std::move(row));
-    return chart;
-}
-
-// One avatar circle: a 32×32 view with the initial letter centered.
-ElementPtr avatar_circle(const Palette& pal, const std::wstring& initial,
-                         Color bg, bool bordered = true) {
-    Props outer_p;
-    outer_p.background = bg;
-    outer_p.width  = 32.0f;
-    outer_p.height = 32.0f;
-    outer_p.radius = 16.0f;
-    outer_p.border_color = pal.surface;
-    outer_p.border_width = bordered ? 2.0f : 0.0f;
-    outer_p.align = Align::center;
-    auto outer = view(std::move(outer_p));
-
-    Props txt_p;
-    txt_p.text  = initial;
-    txt_p.text_color = pal.on_accent;
-    txt_p.font_size_pt = tokens::font_caption;
-    txt_p.text_align = Align::center;
-    auto txt_text = txt_p.text;
-    outer->children.push_back(label(txt_text, std::move(txt_p)));
-    return outer;
-}
-
-// A row of avatar circles with negative margin for overlap. If there are
-// more than max_visible initials, the last visible slot is replaced by a
-// "+N" indicator.
-ElementPtr avatar_group(const Palette& pal,
-                        const std::vector<Color>& backgrounds,
-                        const std::vector<std::wstring>& initials,
-                        int max_visible = 4) {
-    Props row_p;
-    row_p.direction = Direction::row;
-    row_p.align = Align::center;
-    auto row = view(std::move(row_p));
-
-    const int visible = std::min(max_visible, static_cast<int>(initials.size()));
-    const int overflow = static_cast<int>(initials.size()) - visible;
-
-    for (int i = 0; i < visible; ++i) {
-        auto av = avatar_circle(pal, initials[i], backgrounds[i], true);
-        if (i > 0) {
-            // Negative margin pulls each subsequent avatar leftward so the
-            // circles overlap. Layout reserves margin_main space but the
-            // size is clamped to kMinSize, so the row ends up the width of
-            // one avatar plus (n-1)*overlap.
-            av->props.margin.left = -12.0f;
-        }
-        row->children.push_back(std::move(av));
-    }
-    if (overflow > 0) {
-        Props more_p;
-        more_p.background = pal.surface_variant;
-        more_p.text_color = pal.text_secondary;
-        more_p.text = L"+" + std::to_wstring(overflow);
-        more_p.width  = 32.0f;
-        more_p.height = 32.0f;
-        more_p.radius = 16.0f;
-        more_p.border_color = pal.surface;
-        more_p.border_width = 2.0f;
-        more_p.font_size_pt = tokens::font_caption;
-        more_p.text_align = Align::center;
-        more_p.align = Align::center;
-        auto more = view(std::move(more_p));
-        auto more_text = more_p.text;
-        more->children.push_back(label(more_text, std::move(more_p)));
-        more->props.margin.left = -12.0f;
-        row->children.push_back(std::move(more));
-    }
-    return row;
-}
-
-// Breadcrumb: items separated by › chevrons. All but the last are
-// clickable (calls on_select with the index).
-ElementPtr breadcrumbs(const Palette& pal,
-                       const std::vector<std::wstring>& items,
-                       std::function<void(int)> on_select) {
-    Props row_p;
-    row_p.direction = Direction::row;
-    row_p.align = Align::center;
-    row_p.gap = static_cast<float>(tokens::spacing_xs);
-    auto row = view(std::move(row_p));
-
-    for (size_t i = 0; i < items.size(); ++i) {
-        if (i > 0) {
-            Props sep_p;
-            sep_p.text  = L"›";
-            sep_p.text_color = pal.text_secondary;
-            sep_p.font_size_pt = tokens::font_body;
-            sep_p.text_align = Align::center;
-            auto sep_text = sep_p.text;
-            row->children.push_back(label(sep_text, std::move(sep_p)));
-        }
-        const bool is_last = (i + 1 == items.size());
-        Props p;
-        p.text  = items[i];
-        p.text_color = is_last ? pal.text : pal.accent;
-        p.font_size_pt = tokens::font_body;
-        p.text_align = Align::center;
-        p.padding = EdgeInsets{
-            static_cast<float>(tokens::spacing_xs),
-            static_cast<float>(tokens::spacing_xs),
-            static_cast<float>(tokens::spacing_xs),
-            static_cast<float>(tokens::spacing_xs)};
-        if (!is_last) {
-            p.hover_background = pal.surface_variant;
-            p.radius = static_cast<float>(tokens::radius_sm);
-            const int idx = static_cast<int>(i);
-            p.on_click = [on_select, idx] { on_select(idx); };
-        }
-        auto item_text = p.text;
-        row->children.push_back(label(item_text, std::move(p)));
-    }
-    return row;
-}
-
 // ---- Data viz section -------------------------------------------------------
 //
 // Two side-by-side cards, each holding a different mix of the widgets above.
@@ -2333,13 +1786,23 @@ ElementPtr data_viz_section(App& app) {
     const Palette& pal = app.host.palette();
 
     // ---- Calendar ----
-    auto cal_block = calendar(app, pal);
+    auto cal_block = ui::calendar(pal, app.cal_year.get(), app.cal_month.get(),
+        app.cal_selected.get(),
+        [&app](int delta) {
+            int m = app.cal_month.get() + delta;
+            int y = app.cal_year.get();
+            while (m < 0)  { m += 12; y -= 1; }
+            while (m > 11) { m -= 12; y += 1; }
+            app.cal_month.set(m);
+            app.cal_year.set(y);
+        },
+        [&app](int d) { app.cal_selected.set(d); });
 
     // ---- Bar chart ----
     std::vector<std::wstring> week_labels = {
         L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat", L"Sun"};
     std::vector<float> week_values = {30.0f, 65.0f, 45.0f, 80.0f, 55.0f, 90.0f, 50.0f};
-    auto chart_block = bar_chart(pal, week_labels, week_values, 100.0f);
+    auto chart_block = ui::bar_chart(pal, week_labels, week_values, 100.0f);
 
     Props chart_wrapper_p;
     chart_wrapper_p.background = pal.surface;
@@ -2371,7 +1834,7 @@ ElementPtr data_viz_section(App& app) {
     std::vector<Color> team_colors = {pal.accent, pal.success, pal.warning,
                                       pal.info, pal.danger};
     std::vector<std::wstring> team_initials = {L"AM", L"BJ", L"CK", L"DL", L"EM"};
-    auto avatars_block = avatar_group(pal, team_colors, team_initials, 4);
+    auto avatars_block = ui::avatar_group(pal, team_colors, team_initials, 4);
 
     Props avatar_wrapper_p;
     avatar_wrapper_p.background = pal.surface;
@@ -2399,7 +1862,7 @@ ElementPtr data_viz_section(App& app) {
     }
 
     // ---- Breadcrumb ----
-    auto breadcrumb_block = breadcrumbs(pal,
+    auto breadcrumb_block = ui::breadcrumbs(pal,
         {L"Home", L"Projects", L"WinFlux", L"Gallery"},
         [](int) {});
 

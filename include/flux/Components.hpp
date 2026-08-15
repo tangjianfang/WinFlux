@@ -269,4 +269,35 @@ struct TreeItem {
                                       std::function<ElementPtr(int)> make_row,
                                       Props p = {});
 
+// ---- Pickers & data viz (promoted from Gallery) ------------------------------
+
+[[nodiscard]] int days_in_month(int year, int month) noexcept;
+[[nodiscard]] int first_weekday(int year, int month) noexcept;   // 0=Sunday
+
+[[nodiscard]] ElementPtr radio_group(const Palette& pal, std::vector<std::wstring> options,
+                                     int selected, std::function<void(int)> on_change,
+                                     Props p = {});
+[[nodiscard]] ElementPtr color_picker(const Palette& pal, std::vector<Color> swatches,
+                                      int selected, std::function<void(int)> on_change,
+                                      int per_row = 6, Props p = {});
+[[nodiscard]] ElementPtr date_picker(const Palette& pal, int year, int month, int day,
+                                     std::function<void(int, int, int)> on_change,
+                                     Props p = {});
+
+[[nodiscard]] ElementPtr bar_chart(const Palette& pal,
+                                   const std::vector<std::wstring>& labels,
+                                   const std::vector<float>& values, float max_value,
+                                   Props p = {});
+[[nodiscard]] ElementPtr avatar_group(const Palette& pal,
+                                      const std::vector<Color>& backgrounds,
+                                      const std::vector<std::wstring>& initials,
+                                      int max_visible = 4, Props p = {});
+[[nodiscard]] ElementPtr breadcrumbs(const Palette& pal,
+                                     const std::vector<std::wstring>& items,
+                                     std::function<void(int)> on_select, Props p = {});
+[[nodiscard]] ElementPtr calendar(const Palette& pal, int year, int month,
+                                  int selected_day,
+                                  std::function<void(int)> on_month_delta,
+                                  std::function<void(int)> on_select_day, Props p = {});
+
 } // namespace flux::ui

@@ -509,6 +509,17 @@ void test_data_components() {
     }
 }
 
+void test_pickers_math() {
+    expect(ui::days_in_month(2026, 0) == 31 && ui::days_in_month(2026, 3) == 30,
+           "days_in_month month lengths");
+    expect(ui::days_in_month(2024, 1) == 29 && ui::days_in_month(2026, 1) == 28,
+           "February leap / non-leap");
+    // 2026-08-14 is a Saturday (6).
+    expect(ui::first_weekday(2026, 7) == 6, "first_weekday: Aug 2026 starts Saturday");
+    // 2026-01-01 is a Thursday (4).
+    expect(ui::first_weekday(2026, 0) == 4, "first_weekday: Jan 2026 starts Thursday");
+}
+
 void test_charts() {
     // value_range pads flat series so the line sits mid-box.
     {
@@ -892,6 +903,7 @@ int main() {
     test_menus();
     test_layout_components();
     test_data_components();
+    test_pickers_math();
     test_charts();
     test_builders();
     test_layout_row_grow();
