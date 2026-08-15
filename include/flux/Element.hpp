@@ -121,6 +121,9 @@ struct Props {
     // Auto-focus: the Host steers focused_input_path_ (text caret) to the
     // first autofocus element laid out this frame (overlays included).
     bool autofocus = false;
+    // drag_handle axis: true reports the normalized position along the
+    // parent's vertical axis (splitter(vertical=true)). Interaction-only.
+    bool drag_vertical = false;
 
     // Typed-element payloads
     std::optional<bool> checked;   // present => checkbox glyph rendering

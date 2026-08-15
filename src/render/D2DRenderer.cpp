@@ -233,6 +233,10 @@ IDWriteTextFormat* D2DRenderer::format(float size_pt, bool bold) noexcept {
 void D2DRenderer::fill_rect(Rect r, Color c) noexcept {
     if (frame_rt_ == nullptr) return;
     if (ID2D1SolidColorBrush* b = brush(c)) {
+        // Brushes are cached per colour and every other draw mutates their
+        // opacity — reset from the colour's own alpha so the per-frame
+        // background clear never inherits a stale partial alpha.
+        b->SetOpacity(c.a / 255.0f);
         frame_rt_->FillRectangle(to_rect(r), b);
     }
 }

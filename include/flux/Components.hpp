@@ -52,9 +52,12 @@ struct AccordionSection {
 
 enum class AlertKind { info, success, warning, danger };
 
-// Inline banner with a kind-coloured stripe and an optional dismiss "x".
+// Inline banner with a kind-coloured stripe; a non-null on_dismiss adds
+// an "×" close affordance on the right.
 [[nodiscard]] ElementPtr alert(const Palette& pal, AlertKind kind,
-                               std::wstring text, Props p = {});
+                               std::wstring text,
+                               std::function<void()> on_dismiss = nullptr,
+                               Props p = {});
 
 enum class BadgeKind { neutral, accent, success, warning, danger, info };
 

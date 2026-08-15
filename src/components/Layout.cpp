@@ -21,6 +21,7 @@ ElementPtr make_drag_handle(const Palette& pal, bool vertical,
     p.cursor = vertical ? Cursor::size_ns : Cursor::size_we;
     p.tooltip_text = L"Drag to resize";
     auto handle = std::make_shared<Element>();
+    handle->props.drag_vertical = vertical;
     handle->type = L"drag_handle";
     handle->props = std::move(p);
     handle->props.on_value_change = std::move(on_value);

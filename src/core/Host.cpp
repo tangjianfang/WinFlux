@@ -231,6 +231,9 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 host->handle_mouse_wheel(static_cast<int>(GET_WHEEL_DELTA_WPARAM(wparam)),
                                          GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
                 return 0;
+            case WM_CAPTURECHANGED:
+                host->drag_scroll_.clear();
+                return 0;
             case WM_CONTEXTMENU: {
                 const int sx = GET_X_LPARAM(lparam);
                 const int sy = GET_Y_LPARAM(lparam);
@@ -387,10 +390,14 @@ void Host::scroll_to(const Path& sv_path, float offset) noexcept {
     const float next = std::clamp(offset, 0.0f, max_off);
     if (next == it->second.offset_y) return;
     it->second.offset_y = next;
-    it->second.last_scroll_ms = GetTickCount64();
-    // Hold 600 ms + fade over motion_medium: arm the clock past both so the
-    // auto-hide actually completes (see draw_scrollbar).
-    animate_for(600u + static_cast<unsigned>(tokens::motion_medium_ms) + 32u);
+    const unsigned long long now = GetTickCount64();
+    it->second.last_scroll_ms = now;
+    // Auto-hide: the bar is static (alpha 1) for a 600 ms hold, then fades
+    // over motion_medium_ms. Only the fade needs frames — keep the timer
+    // alive through the hold with WAKE-only ticks (no animating() => no
+    // fullscreen dirty), then promote to real frames when the fade starts.
+    scrollbar_fade_at_ms_ = now + 600u;
+    if (hwnd_ != nullptr) SetTimer(hwnd_, anim_timer_id_, anim_tick_ms_, nullptr);
     // Virtualization hook: the scroll_view element (still this frame's
     // tree) observes the offset and can rebuild just the visible window.
     if (const Element* sv = resolve(sv_path);
@@ -401,8 +408,13 @@ void Host::scroll_to(const Path& sv_path, float offset) noexcept {
 }
 
 void Host::handle_mouse_wheel(int delta, int px, int py) noexcept {
-    const float lx = to_logical_px(px);
-    const float ly = to_logical_px(py);
+    // WM_MOUSEWHEEL delivers SCREEN coordinates; everything downstream is
+    // client-logical. (Test runs that happened to work were positioned
+    // near the screen origin.)
+    POINT pt{px, py};
+    if (hwnd_ != nullptr) ScreenToClient(hwnd_, &pt);
+    const float lx = to_logical_px(pt.x);
+    const float ly = to_logical_px(pt.y);
     Path path;
     (void)hit_test_all(lx, ly, path);
     // Nearest scrollable ancestor of the point wins.
@@ -443,9 +455,14 @@ void Host::update_tooltip() noexcept {
         animate_for(static_cast<unsigned>(dwell - elapsed) + 2u);
         return;
     }
-    // Armed: the card follows the cursor, so keep frames coming while the
-    // pointer keeps moving inside the same hover target.
-    animate_for(64);
+    // Armed: the card follows the cursor, so keep frames coming ONLY while
+    // the pointer actually moves inside the same hover target — a parked
+    // cursor must not self-perpetuate a 60fps fullscreen repaint loop.
+    if (last_mouse_lx_ != tooltip_follow_lx_ || last_mouse_ly_ != tooltip_follow_ly_) {
+        tooltip_follow_lx_ = last_mouse_lx_;
+        tooltip_follow_ly_ = last_mouse_ly_;
+        animate_for(64);
+    }
     frame_overlays_.push_back(build_tooltip(text));
 }
 
@@ -498,11 +515,18 @@ void Host::handle_timer() noexcept {
             shown_ = lerp_palette(fade_from_, fade_to_, ease_in_out(t));
         }
     }
-    if (!fading_ && now >= anim_deadline_ms_) {
-        anim_deadline_ms_ = 0;
-        if (hwnd_ != nullptr) KillTimer(hwnd_, anim_timer_id_);
+    // Scrollbar auto-hide hold elapsed: start the fade frames.
+    if (scrollbar_fade_at_ms_ != 0 && now >= scrollbar_fade_at_ms_) {
+        scrollbar_fade_at_ms_ = 0;
+        animate_for(static_cast<unsigned>(tokens::motion_medium_ms) + 32u);
     }
-    request_render();   // next tween step, or the settle frame
+    const bool frame_needed = fading_ || now < anim_deadline_ms_;
+    const bool more = frame_needed || scrollbar_fade_at_ms_ != 0;
+    if (!more && hwnd_ != nullptr) {
+        KillTimer(hwnd_, anim_timer_id_);
+    }
+    // Wake-only ticks (scrollbar hold) deliberately render nothing.
+    if (frame_needed) request_render();   // next tween step, or the settle frame
 }
 
 float Host::to_logical_px(int px) const noexcept {
@@ -651,7 +675,11 @@ const Element* Host::hit_test_all(float lx, float ly, Path& path) const noexcept
             path.insert(path.end(), inner.begin(), inner.end());
             return node;
         }
-        if (root.props.background.has_value()) {
+        // A root with a background is a scrim; a transparent root WITH an
+        // on_click is an invisible scrim (the click-outside-to-close idiom
+        // used by dropdowns/menus/palettes). Both swallow hits that miss
+        // every child; only a handler-less transparent root passes through.
+        if (root.props.background.has_value() || root.props.on_click) {
             path = Path{-1, static_cast<int>(oi)};
             return &root;
         }
@@ -715,15 +743,18 @@ void Host::handle_mouse_move(int px, int py) noexcept {
             e->props.on_value_change(v);
         } else if (const Element* dh = resolve(pressed_path_);
                    dh != nullptr && dh->type == L"drag_handle" &&
-                   e->props.on_value_change && pressed_path_.size() >= 2) {
+                   dh->props.on_value_change && pressed_path_.size() >= 2) {
             // Generic drag handle (splitter): normalized position inside the
-            // PARENT container maps to 0..1.
+            // PARENT container along the handle's axis maps to 0..1.
             Path parent_path = pressed_path_;
             parent_path.pop_back();
-            if (const Element* parent = resolve(parent_path);
-                parent != nullptr && parent->w > 0.0f) {
-                const float t = std::clamp((lx - parent->x) / parent->w, 0.0f, 1.0f);
-                dh->props.on_value_change(t);
+            if (const Element* parent = resolve(parent_path); parent != nullptr) {
+                const bool vert = dh->props.drag_vertical;
+                const float span = vert ? parent->h : parent->w;
+                if (span > 0.0f) {
+                    const float pos = vert ? (ly - parent->y) : (lx - parent->x);
+                    dh->props.on_value_change(std::clamp(pos / span, 0.0f, 1.0f));
+                }
             }
         }
     }
@@ -825,15 +856,18 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
             e->props.on_value_change(v);
         } else if (const Element* dh = resolve(new_pressed);
                    dh != nullptr && dh->type == L"drag_handle" &&
-                   e->props.on_value_change && new_pressed.size() >= 2) {
+                   dh->props.on_value_change && new_pressed.size() >= 2) {
             // A drag_handle press immediately reports the normalized
             // position inside its parent (splitter jump-to).
             Path parent_path = new_pressed;
             parent_path.pop_back();
-            if (const Element* parent = resolve(parent_path);
-                parent != nullptr && parent->w > 0.0f) {
-                dh->props.on_value_change(
-                    std::clamp((lx - parent->x) / parent->w, 0.0f, 1.0f));
+            if (const Element* parent = resolve(parent_path); parent != nullptr) {
+                const bool vert = dh->props.drag_vertical;
+                const float span = vert ? parent->h : parent->w;
+                if (span > 0.0f) {
+                    const float pos = vert ? (ly - parent->y) : (lx - parent->x);
+                    dh->props.on_value_change(std::clamp(pos / span, 0.0f, 1.0f));
+                }
             }
         }
     }
@@ -936,14 +970,16 @@ void Host::handle_key_down(WPARAM vk) noexcept {
     // App key hook first (command palette Ctrl+K and friends).
     if (key_hook_ && key_hook_(static_cast<unsigned>(vk))) return;
 
-    // Esc closes the topmost overlay: its root's on_click is the dismiss
-    // semantics (scrim click and Esc share one handler).
-    if (vk == VK_ESCAPE && !frame_overlays_.empty()) {
-        const Element* top = frame_overlays_.back().get();
-        if (top != nullptr && top->props.on_click && top->props.enabled) {
-            top->props.on_click();
+    // Esc closes the topmost overlay that HAS a dismiss handler — the
+    // host-native tooltip (appended last, no on_click) must not swallow it.
+    if (vk == VK_ESCAPE) {
+        for (size_t oi = frame_overlays_.size(); oi-- > 0;) {
+            const Element* top = frame_overlays_[oi].get();
+            if (top != nullptr && top->props.on_click && top->props.enabled) {
+                top->props.on_click();
+                return;
+            }
         }
-        return;
     }
 
     // VK_BACK on a focused text_input deletes the trailing character. We do
@@ -986,6 +1022,27 @@ void Host::handle_key_down(WPARAM vk) noexcept {
             fe != nullptr && fe->props.on_key && fe->props.enabled) {
             fe->props.on_key(static_cast<unsigned>(vk));
             return;
+        }
+    }
+
+    // Text inputs never enter focus_path_ (they steer
+    // focused_input_path_ instead), so navigation keys for handlers
+    // living on an input — the command palette — dispatch here. The
+    // allowlist keeps text-editing keys (backspace via VK_BACK, chars via
+    // WM_CHAR) flowing to the built-in input handling.
+    if (!focused_input_path_.empty()) {
+        switch (vk) {
+        case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
+        case VK_RETURN: case VK_PRIOR: case VK_NEXT: {
+            if (const Element* fe = resolve(focused_input_path_);
+                fe != nullptr && fe->props.on_key && fe->props.enabled) {
+                fe->props.on_key(static_cast<unsigned>(vk));
+                return;
+            }
+            break;
+        }
+        default:
+            break;
         }
     }
 
@@ -1035,6 +1092,10 @@ void Host::handle_char(WPARAM ch) noexcept {
         std::wstring text = e->props.text;
         text.push_back(static_cast<wchar_t>(ch));
         e->props.on_text_change(std::move(text));
+        // Handlers that mutate plain app structs (not State<T>) don't
+        // invalidate anything themselves — the palette query would stay
+        // stale until an unrelated repaint.
+        request_render();
     }
 }
 
@@ -1043,6 +1104,11 @@ void Host::handle_char(WPARAM ch) noexcept {
 // =====================================================================
 
 void Host::paint_frame() noexcept {
+    // Re-entry / validity guard: a WM_PAINT (or a builder callback that
+    // synchronously pumps) must not wipe frame_overlays_ mid-draw, and a
+    // frame drawn with an invalid presenter must not advance the paint
+    // baseline (the recovered frame would never repaint).
+    if (painting_ || !renderer_.valid()) return;
     // Short-circuit: if nothing has invalidated the scene since the last paint
     // (and we don't owe a forced full repaint or an in-flight animation /
     // fade frame), the DComp surface is still correct. Skipping avoids
@@ -1129,20 +1195,33 @@ void Host::paint_frame() noexcept {
     DamageTracker::InteractionState next_interaction{
         hover_path_, pressed_path_, focus_path_};
 
-    // Interaction state that points into an overlay can't be resolved
-    // against the main tree by the damage diff — force full for that frame.
-    // (Overlay set changes likewise: scrim appears/disappears everywhere.)
+    // Interaction state that points into an overlay can't be resolved by
+    // the main-tree diff — resolve those paths against the (already laid
+    // out) overlay trees and dirty just the old/new element rects. An
+    // unresolvable path (tree shape changed) still falls back to full.
     const auto touches_overlay = [](const Path& p) noexcept {
         return !p.empty() && p[0] == -1;
     };
-    const bool overlay_interaction = touches_overlay(hover_path_) ||
-        touches_overlay(pressed_path_) || touches_overlay(focus_path_) ||
-        touches_overlay(prev_hover_path_) || touches_overlay(prev_pressed_path_) ||
-        touches_overlay(prev_focus_path_);
+    std::vector<Rect> overlay_interaction_rects;
+    bool overlay_interaction_unresolved = false;
+    {
+        const Path* const interaction_paths[] = {
+            &hover_path_, &pressed_path_, &focus_path_,
+            &prev_hover_path_, &prev_pressed_path_, &prev_focus_path_};
+        for (const Path* p : interaction_paths) {
+            if (!touches_overlay(*p)) continue;
+            if (const Element* e = resolve(*p)) {
+                overlay_interaction_rects.push_back(Rect{e->x, e->y, e->w, e->h});
+            } else {
+                overlay_interaction_unresolved = true;
+            }
+        }
+    }
     const bool overlay_set_changed = frame_overlays_.size() != prev_overlays_.size();
 
     std::vector<Rect> dirty_rects;
-    if (force_full_dirty_ || animating() || overlay_set_changed || overlay_interaction) {
+    if (force_full_dirty_ || animating() || overlay_set_changed ||
+        overlay_interaction_unresolved) {
         if (logical_w > 0.0f && logical_h > 0.0f) {
             dirty_rects.push_back(Rect{0.0f, 0.0f, logical_w, logical_h});
         }
@@ -1157,6 +1236,9 @@ void Host::paint_frame() noexcept {
                                                  logical_w, logical_h);
             dirty_rects.insert(dirty_rects.end(), rects.begin(), rects.end());
         }
+        dirty_rects.insert(dirty_rects.end(),
+                           overlay_interaction_rects.begin(),
+                           overlay_interaction_rects.end());
         if (dirty_rects.size() > damage_tracker_.max_rects * 2) {
             dirty_rects.assign(1, Rect{0.0f, 0.0f, logical_w, logical_h});
         }

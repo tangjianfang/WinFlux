@@ -4,11 +4,14 @@
 
 #include <flux/Components.hpp>
 
+#include <vector>
+
 namespace flux::ui {
 
 // ---- Static feedback ----------------------------------------------------
 
-ElementPtr alert(const Palette& pal, AlertKind kind, std::wstring text, Props p) {
+ElementPtr alert(const Palette& pal, AlertKind kind, std::wstring text,
+                  std::function<void()> on_dismiss, Props p) {
     Color stripe = pal.info;
     switch (kind) {
     case AlertKind::info:    stripe = pal.info;    break;
@@ -17,8 +20,8 @@ ElementPtr alert(const Palette& pal, AlertKind kind, std::wstring text, Props p)
     case AlertKind::danger:  stripe = pal.danger;  break;
     }
 
-    // [kind-coloured stripe][text] — the stripe stretches to full height
-    // via the row's cross-axis stretch.
+    // [kind-coloured stripe][text][optional ×] — the stripe stretches to
+    // full height via the row's cross-axis stretch.
     Props outer_p = std::move(p);
     outer_p.direction = Direction::row;
     outer_p.align = Align::stretch;
@@ -41,6 +44,20 @@ ElementPtr alert(const Palette& pal, AlertKind kind, std::wstring text, Props p)
                                static_cast<float>(tokens::spacing_sm),
                                static_cast<float>(tokens::spacing_md)};
     outer->children.push_back(label(text, std::move(txt_p)));
+
+    if (on_dismiss) {
+        Props x_p;
+        x_p.icon = IconKind::close;
+        x_p.width = 22.0f;
+        x_p.height = 22.0f;
+        x_p.text_color = pal.text_secondary;
+        x_p.hover_background = pal.surface_hover;
+        x_p.radius = static_cast<float>(tokens::radius_sm);
+        x_p.tooltip_text = L"Dismiss";
+        x_p.align = Align::center;
+        ClickHandler dismiss = std::move(on_dismiss);
+        outer->children.push_back(flux::button(L"", dismiss, std::move(x_p)));
+    }
     return outer;
 }
 
@@ -143,7 +160,23 @@ void overlay_toasts(Host& host, ToastHost& th, const Palette& pal) noexcept {
         txt_p.font_size_pt = tokens::font_caption;
         txt_p.text_align = Align::start;
         txt_p.padding = EdgeInsets{10.0f, 10.0f, 10.0f, 10.0f};
+        txt_p.flex_grow = 1.0f;
         card->children.push_back(label(t.text, std::move(txt_p)));
+
+        // Early-dismiss ×: removes this entry from the host by id.
+        Props x_p;
+        x_p.icon = IconKind::close;
+        x_p.width = 20.0f;
+        x_p.height = 20.0f;
+        x_p.text_color = pal.text_secondary;
+        x_p.hover_background = pal.surface_hover;
+        x_p.radius = static_cast<float>(tokens::radius_sm);
+        x_p.tooltip_text = L"Dismiss";
+        const int tid = t.id;
+        ClickHandler dismiss = [&th, tid] {
+            std::erase_if(th.entries, [tid](const ToastSpec& e) { return e.id == tid; });
+        };
+        card->children.push_back(flux::button(L"", dismiss, std::move(x_p)));
         root->children.push_back(std::move(card));
     }
     host.overlay(std::move(root));
@@ -194,7 +227,9 @@ void overlay_modal(Host& host, ModalHost& mh, const Palette& pal) noexcept {
     title_p.text_align = Align::start;
     card->children.push_back(label(mh.current->title, std::move(title_p)));
 
-    if (mh.current->body != nullptr) card->children.push_back(std::move(mh.current->body));
+    // Copy (not move): the body lives in the app-owned ModalHost across
+    // frames; moving it would null the host's copy after the first render.
+    if (mh.current->body != nullptr) card->children.push_back(mh.current->body);
 
     Props close_p;
     close_p.background = pal.accent;

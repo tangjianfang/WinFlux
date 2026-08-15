@@ -1184,7 +1184,9 @@ ElementPtr patterns_right_section(App& app) {
 
     ElementPtr al;
     if (app.show_alert.get()) {
-        al = ui::alert(pal, ui::AlertKind::info, L"This alert dismisses with the x button.");
+        al = ui::alert(pal, ui::AlertKind::info,
+                       L"This alert dismisses with the x button.",
+                       [&app] { app.show_alert.set(false); });
     } else {
         Props empty_p;
         empty_p.height = 1.0f;

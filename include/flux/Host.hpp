@@ -250,9 +250,16 @@ private:
     void update_tooltip() noexcept;
     [[nodiscard]] ElementPtr build_tooltip(const std::wstring& text) const noexcept;
     void apply_autofocus() noexcept;
+    // Cursor position the tooltip last rendered at — armed frames are only
+    // requested while the pointer keeps moving (no idle repaint loop).
+    float tooltip_follow_lx_ = -1.0f;
+    float tooltip_follow_ly_ = -1.0f;
     // Unified animation-clock deadline (animate_for). The WM_TIMER stays
     // armed while now < deadline or a theme fade is running.
     unsigned long long anim_deadline_ms_ = 0;
+    // Scrollbar auto-hide: hold-end timestamp (WAKE-only timer ticks —
+    // frames are only requested once the fade window opens).
+    unsigned long long scrollbar_fade_at_ms_ = 0;
     // App-level hooks (set_key_hook / set_context_menu_handler).
     std::function<bool(unsigned vk)> key_hook_;
     std::function<void(float, float)> context_menu_handler_;

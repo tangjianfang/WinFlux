@@ -20,7 +20,10 @@ ElementPtr bar_chart(const Palette& pal, const std::vector<std::wstring>& labels
     row_p.flex_grow = 1.0f;
     auto row = view(std::move(row_p));
 
-    for (size_t i = 0; i < labels.size(); ++i) {
+    // Parallel arrays: clamp to the shortest so a mismatched update can
+    // never index the values/labels vectors out of bounds.
+    const size_t n = std::min(labels.size(), values.size());
+    for (size_t i = 0; i < n; ++i) {
         const float v = values[i];
         const float h = std::max(2.0f, (v / max_value) * kMaxBarHeight);
 
@@ -78,8 +81,7 @@ ElementPtr avatar_group(const Palette& pal, const std::vector<Color>& background
     row_p.align = Align::center;
     auto row = view(std::move(row_p));
 
-    const auto avatar = [&](const std::wstring& initial, Color bg,
-                            const std::wstring& text, Color text_color, Color bkg) {
+    const auto avatar = [&](const std::wstring& text, Color bg, Color fg) {
         Props outer_p;
         outer_p.background = bg;
         outer_p.width = 32.0f;
@@ -89,31 +91,28 @@ ElementPtr avatar_group(const Palette& pal, const std::vector<Color>& background
         outer_p.border_width = 2.0f;
         auto outer = view(std::move(outer_p));
         Props txt_p;
-        txt_p.text = text.empty() ? initial : text;
-        txt_p.text_color = text_color;
+        txt_p.text = text;
+        txt_p.text_color = fg;
         txt_p.font_size_pt = tokens::font_caption;
         txt_p.text_align = Align::center;
         outer->children.push_back(label(txt_p.text, txt_p));
-        (void)bkg;
         return outer;
     };
 
-    const int visible = std::min(max_visible, static_cast<int>(initials.size()));
+    const int visible = std::min<int>({max_visible, static_cast<int>(initials.size()),
+                                       static_cast<int>(backgrounds.size())});
     const int overflow = static_cast<int>(initials.size()) - visible;
     for (int i = 0; i < visible; ++i) {
         auto av = avatar(initials[static_cast<size_t>(i)],
-                         backgrounds[static_cast<size_t>(i)], L"", pal.on_accent, {});
+                         backgrounds[static_cast<size_t>(i)], pal.on_accent);
         if (i > 0) av->props.margin.left = -12.0f;   // overlap
         row->children.push_back(std::move(av));
     }
     if (overflow > 0) {
-        Props more_p;
-        more_p.background = pal.surface_variant;
-        const auto more_txt = L"+" + std::to_wstring(overflow);
-        auto more = avatar(L"", {}, more_txt, pal.text_secondary, {});
+        auto more = avatar(L"+" + std::to_wstring(overflow), pal.surface_variant,
+                           pal.text_secondary);
         more->props.margin.left = -12.0f;
         row->children.push_back(std::move(more));
-        (void)more_p;
     }
     return row;
 }
@@ -183,10 +182,12 @@ ElementPtr calendar(const Palette& pal, int year, int month, int selected_day,
         p.height = 28.0f;
         p.text_color = pal.text_secondary;
         p.tooltip_text = tip;
-        p.on_click = [on_month_delta, delta] {
+        // Handler extracted BEFORE the Props move: reading a member of an
+        // object being moved in the same call is the arg-order footgun.
+        ClickHandler handler = [on_month_delta, delta] {
             if (on_month_delta) on_month_delta(delta);
         };
-        return flux::button(L"", p.on_click, std::move(p));
+        return flux::button(L"", std::move(handler), std::move(p));
     };
     header->children.push_back(nav_btn(IconKind::chevron_left, -1, L"Previous month"));
     header->children.push_back(nav_btn(IconKind::chevron_right, 1, L"Next month"));
