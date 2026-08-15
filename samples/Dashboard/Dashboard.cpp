@@ -226,6 +226,27 @@ ElementPtr page_settings(App& app) {
                                             [&app](int i) { app.density.set(i); }));
     col->children.push_back(ui::alert(pal, ui::AlertKind::info,
                                       L"Settings apply immediately — no save button."));
+
+    // Wrapped paragraph + single-line ellipsis demos.
+    Props wrap_p;
+    wrap_p.text = L"This paragraph wraps at its laid-out width because "
+                  L"text_wrap is on — resize the window and the line "
+                  L"breaks follow.";
+    wrap_p.text_color = pal.text_secondary;
+    wrap_p.font_size_pt = tokens::font_body;
+    wrap_p.text_align = Align::start;
+    wrap_p.text_wrap = true;
+    wrap_p.width = 320.0f;
+    col->children.push_back(label(wrap_p.text, wrap_p));
+
+    Props ell_p;
+    ell_p.text = L"A very long single line that will not fit and ends with an ellipsis…";
+    ell_p.text_color = pal.text_secondary;
+    ell_p.font_size_pt = tokens::font_caption;
+    ell_p.text_align = Align::start;
+    ell_p.text_ellipsis = true;
+    ell_p.width = 220.0f;
+    col->children.push_back(label(ell_p.text, ell_p));
     return col;
 }
 
@@ -318,10 +339,13 @@ ElementPtr build(App& app) {
         app.selected_server.get() < static_cast<int>(kServers.size())) {
         const auto& srv = kServers[static_cast<size_t>(app.selected_server.get())];
         Props body_p;
-        body_p.text = srv[0] + L"\nStatus: " + srv[1] + L"\nUptime: " + srv[2];
+        body_p.text = srv[0] + L"\nStatus: " + srv[1] + L"\nUptime: " + srv[2] +
+                       L"\nLast incident: none in the reporting window.";
         body_p.text_color = pal.text;
         body_p.font_size_pt = tokens::font_body;
         body_p.text_align = Align::start;
+        body_p.text_wrap = true;
+        body_p.width = 248.0f;   // wrap target (drawer width minus chrome)
         ui::overlay_drawer(host, app.drawer_host, pal,
                            label(body_p.text, body_p));
     } else {

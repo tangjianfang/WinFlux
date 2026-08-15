@@ -98,6 +98,9 @@ struct Props {
     std::optional<Color> disabled_text_color;
     bool bold = false;
     Align text_align = Align::center;
+    bool text_wrap = false;        // wrap at the laid-out width (needs an
+                                   // explicit width for correct measurement)
+    bool text_ellipsis = false;    // trim overflow with "…"
 
     // Interaction
     ClickHandler on_click;

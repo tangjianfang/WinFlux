@@ -51,6 +51,11 @@ public:
                    float stroke_width, float alpha = 1.0f) noexcept;
     void draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
                    bool bold, Align halign, float alpha = 1.0f) noexcept;
+    // Multi-line text: explicit \n always breaks; text_wrap wraps at the
+    // rect width; text_ellipsis trims a single overflowing line with "…".
+    void draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
+                   bool bold, Align halign, bool wrap, bool ellipsis,
+                   float alpha = 1.0f) noexcept;
     // Horizontal L->R gradient fill; SetStartPoint/SetEndPoint are updated
     // per call so one cached brush serves every rect.
     void fill_round_rect_gradient(Rect r, float radius, const Gradient& g,
@@ -73,7 +78,8 @@ public:
     void draw_pie_slice(float cx, float cy, float r, float start_deg,
                         float sweep_deg, Color c, float alpha = 1.0f) noexcept;
     [[nodiscard]] std::pair<float, float> measure_text(const std::wstring& text,
-                                                       float size_pt, bool bold) noexcept;
+                                                       float size_pt, bool bold,
+                                                       float wrap_width = 0.0f) noexcept;
     void push_clip(Rect r) noexcept;
     void pop_clip() noexcept;
 
@@ -118,6 +124,10 @@ private:
     // Gradient brushes keyed by (from,to) colour pair.
     std::unordered_map<unsigned long long,
                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> gradients_;
+    // Ellipsis trimming signs keyed by format_key (created from the dwrite
+    // factory + that format).
+    std::unordered_map<unsigned int,
+                       Microsoft::WRL::ComPtr<IDWriteInlineObject>> ellipsis_signs_;
     // Per-(text,format) IDWriteTextLayout cache, keyed by a 64-bit hash that
     // mixes the format key with the text pointer/size. measure_text reuses
     // the same layout across frames so long as the text and format haven't

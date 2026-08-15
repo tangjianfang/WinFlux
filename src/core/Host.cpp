@@ -1145,7 +1145,10 @@ void Host::paint_frame() noexcept {
         LayoutContext ctx;
         ctx.measure_leaf = [this](const Element& e) -> std::pair<float, float> {
             const float box = static_cast<float>(tokens::checkbox_box);
-            const auto [tw, th] = renderer_.measure_text(e.props.text, e.props.font_size_pt, e.props.bold);
+            const float wrap_w = (e.props.text_wrap && e.props.width.has_value())
+                ? *e.props.width : 0.0f;
+            const auto [tw, th] = renderer_.measure_text(e.props.text, e.props.font_size_pt,
+                                                         e.props.bold, wrap_w);
             if (e.type == L"checkbox") {
                 return {box + tokens::spacing_sm + tw, std::max(box, th)};
             }
@@ -1418,7 +1421,8 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
                           r.w - p.padding.left - kInline - static_cast<float>(tokens::spacing_sm) - p.padding.right,
                           r.h};
         }
-        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, p.bold, p.text_align, op);
+        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, p.bold, p.text_align,
+                            p.text_wrap, p.text_ellipsis, op);
     } else if (e.type == L"icon") {
         const float side = std::min(r.w, r.h);
         if (side > 0.0f && op > 0.001f) {

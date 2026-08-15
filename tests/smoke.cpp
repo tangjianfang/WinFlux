@@ -520,6 +520,40 @@ void test_pickers_math() {
     expect(ui::first_weekday(2026, 0) == 4, "first_weekday: Jan 2026 starts Thursday");
 }
 
+void test_multiline_text() {
+    // measure_text runs on the DWrite factory alone — no render target
+    // needed, so these are headless-safe.
+    D2DRenderer r;
+
+    // Explicit \n breaks lines even without wrapping.
+    const auto [w1, h1] = r.measure_text(L"Single", 14.0f, false);
+    const auto [w2, h2] = r.measure_text(L"Line1\nLine2", 14.0f, false);
+    expect(h2 > h1 * 1.8f, "explicit newline doubles the measured height");
+    expect(w2 >= w1 * 0.7f, "multiline width is the longest line");
+
+    // Wrapping at a narrow width grows the height and respects the width.
+    const auto [nw, nh] = r.measure_text(
+        L"The quick brown fox jumps over the lazy dog", 14.0f, false, 60.0f);
+    expect(nh > h1 * 1.5f, "wrapped text is taller than one line");
+    expect(nw <= 61.0f, "wrapped width respects the wrap width");
+
+    // Unwrapped width is the natural single-line size.
+    const auto [uw, uh] = r.measure_text(
+        L"The quick brown fox jumps over the lazy dog", 14.0f, false, 0.0f);
+    expect(uw > 60.0f && near_eq(uh, h1), "no wrap width keeps one line");
+
+    // text_wrap / text_ellipsis participate in the paint diff.
+    Element base = *view();
+    Element v = base;
+    v.props.text_wrap = true;
+    expect(!DamageTracker::paint_props_equal(base.props, v.props),
+           "text_wrap change is paint-dirty");
+    v = base;
+    v.props.text_ellipsis = true;
+    expect(!DamageTracker::paint_props_equal(base.props, v.props),
+           "text_ellipsis change is paint-dirty");
+}
+
 void test_charts() {
     // value_range pads flat series so the line sits mid-box.
     {
@@ -904,6 +938,7 @@ int main() {
     test_layout_components();
     test_data_components();
     test_pickers_math();
+    test_multiline_text();
     test_charts();
     test_builders();
     test_layout_row_grow();

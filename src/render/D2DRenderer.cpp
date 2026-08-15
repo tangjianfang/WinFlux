@@ -271,6 +271,13 @@ void D2DRenderer::draw_line(float x1, float y1, float x2, float y2, Color c,
 
 void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
                             bool bold, Align halign, float alpha) noexcept {
+    draw_text(r, text, size_pt, c, bold, halign, /*wrap=*/false, /*ellipsis=*/false,
+              alpha);
+}
+
+void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Color c,
+                            bool bold, Align halign, bool wrap, bool ellipsis,
+                            float alpha) noexcept {
     if (frame_rt_ == nullptr || text.empty()) return;
     ID2D1SolidColorBrush* b = brush(c);
     IDWriteTextFormat* fmt = format(size_pt, bold);
@@ -281,6 +288,34 @@ void D2DRenderer::draw_text(Rect r, const std::wstring& text, float size_pt, Col
                         : halign == Align::end    ? DWRITE_TEXT_ALIGNMENT_TRAILING
                                                   : DWRITE_TEXT_ALIGNMENT_LEADING);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    // Word wrap + trimming are per-call format state (same pattern as the
+    // alignment above: always set, never rely on the previous draw).
+    fmt->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP
+                              : DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (ellipsis) {
+        IDWriteInlineObject* sign = nullptr;
+        const unsigned fk = format_key(size_pt, bold);
+        auto it = ellipsis_signs_.find(fk);
+        if (it != ellipsis_signs_.end()) {
+            sign = it->second.Get();
+        } else if (ensure_dwrite()) {
+            Microsoft::WRL::ComPtr<IDWriteInlineObject> made;
+            if (SUCCEEDED(dwrite_->CreateEllipsisTrimmingSign(fmt,
+                                                              made.GetAddressOf()))) {
+                sign = made.Get();
+                ellipsis_signs_.emplace(fk, std::move(made));
+            }
+        }
+        DWRITE_TRIMMING trimming{};
+        trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
+        trimming.delimiter = 0;
+        trimming.delimiterCount = 0;
+        fmt->SetTrimming(&trimming, sign);
+    } else {
+        DWRITE_TRIMMING no_trim{};
+        no_trim.granularity = DWRITE_TRIMMING_GRANULARITY_NONE;
+        fmt->SetTrimming(&no_trim, nullptr);
+    }
     frame_rt_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, to_rect(r), b,
                          D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 }
@@ -345,7 +380,8 @@ void D2DRenderer::draw_shadow(Rect r, float radius, int elevation) noexcept {
 }
 
 std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
-                                                  float size_pt, bool bold) noexcept {
+                                                  float size_pt, bool bold,
+                                                  float wrap_width) noexcept {
     if (text.empty() || !ensure_dwrite()) return {0.0f, 0.0f};
     IDWriteTextFormat* fmt = format(size_pt, bold);
     if (fmt == nullptr) return {0.0f, 0.0f};
@@ -362,7 +398,15 @@ std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
     }
     const unsigned long long key = (static_cast<unsigned long long>(fk) << 32) ^ hash;
 
-    Microsoft::WRL::ComPtr<IDWriteTextLayout>& slot = text_layouts_[key];
+    // Wrap width joins the cache key: a wrapped layout is a different
+    // shape than the natural one. 0 = unbounded (natural single/multi-line
+    // size; explicit \n still breaks lines).
+    const unsigned wrap_key = wrap_width > 0.0f
+        ? static_cast<unsigned>(std::lround(wrap_width)) : 0u;
+    const unsigned long long full_key =
+        key ^ (static_cast<unsigned long long>(wrap_key) << 40u);
+
+    Microsoft::WRL::ComPtr<IDWriteTextLayout>& slot = text_layouts_[full_key];
     if (slot == nullptr) {
         // Bound the cache: data-driven text (timestamps, per-row values)
         // would otherwise grow the map without limit. A coarse clear-when-
@@ -370,12 +414,15 @@ std::pair<float, float> D2DRenderer::measure_text(const std::wstring& text,
         // frame or two.
         constexpr size_t kMaxCachedLayouts = 4096;
         if (text_layouts_.size() >= kMaxCachedLayouts) text_layouts_.clear();
-        // Unbounded width layout: the measured extent is the natural text size.
+        // Unbounded width layout: the measured extent is the natural text
+        // size. With a wrap width, the layout wraps there and the height
+        // reflects the resulting line count.
+        const float lw = wrap_key != 0u ? static_cast<float>(wrap_key) : 100000.0f;
         const HRESULT hr = dwrite_->CreateTextLayout(
             text.c_str(), static_cast<UINT32>(text.size()), fmt,
-            100000.0f, 100000.0f, slot.GetAddressOf());
+            lw, 100000.0f, slot.GetAddressOf());
         if (FAILED(hr)) {
-            text_layouts_.erase(key);
+            text_layouts_.erase(full_key);
             return {0.0f, 0.0f};
         }
     }
