@@ -391,6 +391,12 @@ void Host::scroll_to(const Path& sv_path, float offset) noexcept {
     // Hold 600 ms + fade over motion_medium: arm the clock past both so the
     // auto-hide actually completes (see draw_scrollbar).
     animate_for(600u + static_cast<unsigned>(tokens::motion_medium_ms) + 32u);
+    // Virtualization hook: the scroll_view element (still this frame's
+    // tree) observes the offset and can rebuild just the visible window.
+    if (const Element* sv = resolve(sv_path);
+        sv != nullptr && sv->props.on_scroll) {
+        sv->props.on_scroll(next);
+    }
     request_render();
 }
 

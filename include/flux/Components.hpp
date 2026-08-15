@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -221,5 +222,51 @@ struct NavEntry {
 [[nodiscard]] ElementPtr sidenav(const Palette& pal, std::vector<NavEntry> entries,
                                  int active, std::function<void(int)> on_change,
                                  bool collapsed, std::function<void()> on_toggle);
+
+// ---- Data display ---------------------------------------------------------------
+
+struct VisibleRange {
+    int first = 0;
+    int count = 0;
+};
+
+// Visible-row window for a fixed-row-height virtualized list (pure).
+[[nodiscard]] VisibleRange visible_range(float offset_y, float viewport_h,
+                                         float row_h, int total_rows,
+                                         int overscan) noexcept;
+
+// Lexicographic column sort (stable, toggling direction). Pure — exported
+// for tests and for apps that need the same ordering elsewhere.
+[[nodiscard]] std::vector<std::vector<std::wstring>> table_sorted(
+    const std::vector<std::vector<std::wstring>>& rows, int col, bool asc) noexcept;
+
+// Sortable, selectable table. Header clicks toggle the sort column; row
+// clicks select. Wrap in a scroll_view for long bodies.
+[[nodiscard]] ElementPtr data_table(
+    const Palette& pal, std::vector<std::wstring> columns,
+    std::vector<std::vector<std::wstring>> rows, int sort_col, bool sort_asc,
+    std::function<void(int)> on_sort, int selected_row,
+    std::function<void(int)> on_select, Props p = {});
+
+struct TreeItem {
+    std::wstring label;
+    std::vector<TreeItem> children;
+};
+
+// Indented tree; nodes toggle open/closed through `expanded` (index paths),
+// leaves report their path through on_select.
+[[nodiscard]] ElementPtr tree_view(
+    const Palette& pal, std::vector<TreeItem> items,
+    std::set<std::vector<int>> expanded,
+    std::function<void(std::vector<int>)> on_toggle,
+    std::function<void(std::vector<int>)> on_select, Props p = {});
+
+// Content builder for a virtualized scroll list: leading spacer of
+// `first * row_h` rows + only the visible window of rows. Feed the
+// offset from Props::on_scroll; the spacer keeps the scrollbar honest.
+[[nodiscard]] ElementPtr virtual_list(const Palette& pal, int total_rows, float row_h,
+                                      float viewport_h, float offset_y,
+                                      std::function<ElementPtr(int)> make_row,
+                                      Props p = {});
 
 } // namespace flux::ui

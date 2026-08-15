@@ -450,6 +450,65 @@ void test_layout_components() {
     }
 }
 
+void test_data_components() {
+    const Palette pal = palette(ThemeMode::light);
+
+    // visible_range: window math with clamping and overscan.
+    {
+        const auto v = ui::visible_range(500.0f, 200.0f, 20.0f, 100, 4);
+        expect(v.first == 21, "first = offset/row - overscan (clamped)");
+        expect(v.count == 200 / 20 + 1 + 8, "count = viewport rows + 1 + 2*overscan");
+        const auto z = ui::visible_range(0.0f, 200.0f, 20.0f, 5, 4);
+        expect(z.first == 0 && z.count == 5, "tiny list renders everything");
+    }
+
+    // table_sorted: stable lexicographic sort, both directions.
+    {
+        const std::vector<std::vector<std::wstring>> rows = {
+            {L"b", L"2"}, {L"a", L"3"}, {L"c", L"1"}};
+        const auto asc = ui::table_sorted(rows, 0, true);
+        expect(asc[0][0] == L"a" && asc[2][0] == L"c", "ascending sort by column 0");
+        const auto desc = ui::table_sorted(rows, 0, false);
+        expect(desc[0][0] == L"c" && desc[2][0] == L"a", "descending sort");
+    }
+
+    // data_table structure: header + rows; selection paints.
+    {
+        auto t = ui::data_table(pal, {L"Name", L"Qty"},
+                                {{L"alpha", L"1"}, {L"beta", L"2"}}, 0, true, nullptr,
+                                1, nullptr);
+        expect(t->children.size() == 3, "header + two rows");
+        expect(t->children[0]->children.size() == 2, "one header cell per column");
+        expect(t->children[2]->props.background.value_or(pal.surface) == pal.selection,
+               "selected row highlighted");
+    }
+
+    // tree_view: expanded node reveals children; collapsed hides them.
+    {
+        std::vector<ui::TreeItem> items = {
+            {L"parent", {{L"child a", {}}, {L"child b", {}}}},
+            {L"leaf", {}},
+        };
+        auto open = ui::tree_view(pal, items, {{0}}, nullptr, nullptr);
+        // parent row, child a, child b, leaf
+        expect(open->children.size() == 4, "expanded tree shows nested children");
+        auto closed = ui::tree_view(pal, items, {}, nullptr, nullptr);
+        expect(closed->children.size() == 2, "collapsed tree hides children");
+    }
+
+    // virtual_list: spacer + only the visible window built.
+    {
+        int built = 0;
+        auto col = ui::virtual_list(pal, 1000, 20.0f, 200.0f, 500.0f,
+                                    [&](int) { ++built; return view(); });
+        // 200/20 = 10 visible + 1 + 2*4 overscan = 19 rows.
+        expect(built == 19, "only the visible window is built");
+        // Leading spacer carries 21 * 20 = 420 px.
+        expect(near_eq(col->children[0]->props.height.value_or(0.0f), 420.0f),
+               "leading spacer carries the scrolled-out prefix");
+    }
+}
+
 void test_charts() {
     // value_range pads flat series so the line sits mid-box.
     {
@@ -832,6 +891,7 @@ int main() {
     test_components();
     test_menus();
     test_layout_components();
+    test_data_components();
     test_charts();
     test_builders();
     test_layout_row_grow();

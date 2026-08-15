@@ -114,6 +114,10 @@ struct Props {
     // Host's built-in Tab/Space/scroll handling. Components use it for
     // arrows / Enter / Esc navigation (command palette, lists).
     std::function<void(unsigned vk)> on_key;
+    // scroll_view offset callback: fires whenever the scroll position
+    // changes (wheel / drag / keys). The virtualized list view uses it to
+    // rebuild only the visible row window.
+    std::function<void(float offset_y)> on_scroll;
     // Auto-focus: the Host steers focused_input_path_ (text caret) to the
     // first autofocus element laid out this frame (overlays included).
     bool autofocus = false;
