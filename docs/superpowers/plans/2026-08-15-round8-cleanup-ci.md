@@ -8,13 +8,13 @@
 
 ## Tasks
 
-- [ ] 8a 共享 helper：`flux::anchored_overlay_root(ax, ay, on_outside, content)`（Element.hpp/Host.cpp，tooltip 改用）；`ui::popup_card(pal, elevation, width)`、`ui::kind_color(pal, AlertKind)`（ToastKind 复用映射）、`ui::menu_item_button(pal, text, selected, on_click, height)`、`ui::caption(pal, text, Props)`、`ui::icon_button(pal, IconKind, tooltip, on_click, size)`；重写 Overlays/Menus/Layout/DataViz/Charts 内部分叉点；命令面板去掉 matches_copy 快照（按键时重算）；filter_commands 用 towlower 简化。smoke：helper 结构断言
-- [ ] 8b 浮层内滚动：paint_frame 对每个 overlay 根跑 `layout_scroll_views(root, {-1, i}, ctx, next)`；滚轮/键盘/拖拽链路核对（命中路径已带哨兵，注册表键一致即可用）；Gallery 演示：modal 带滚动长文 body。smoke：无新增纯函数（布局链路靠 lifecycle 已有 round-trip + 手动验证）
-- [ ] 8c CI：`.github/workflows/ci.yml`（windows-latest，双 preset configure/build/ctest）；host_lifecycle 尊重 `WINFLUX_SKIP_GUI_TESTS`（跳过并打印原因）；AGENTS.md 注明
-- [ ] 收口：全 tab 视觉走查 + 双 preset 全绿 + 提交
+- [x] 8a 共享 helper：`flux::anchored_overlay_root(ax, ay, on_outside, content)`（Element.hpp/Host.cpp，tooltip 改用）；`ui::popup_card(pal, elevation, width)`、`ui::kind_color(pal, AlertKind)`（ToastKind 复用映射）、`ui::menu_item_button(pal, text, selected, on_click, height)`、`ui::caption(pal, text, Props)`、`ui::icon_button(pal, IconKind, tooltip, on_click, size)`；重写 Overlays/Menus/Layout/DataViz/Charts 内部分叉点；命令面板去掉 matches_copy 快照（按键时重算）；filter_commands 用 towlower 简化。smoke：helper 结构断言
+- [x] 8b 浮层内滚动：paint_frame 对每个 overlay 根跑 `layout_scroll_views(root, {-1, i}, ctx, next)`；滚轮/键盘/拖拽链路核对（命中路径已带哨兵，注册表键一致即可用）；Gallery 演示：modal 带滚动长文 body。smoke：无新增纯函数（布局链路靠 lifecycle 已有 round-trip + 手动验证）
+- [x] 8c CI：`.github/workflows/ci.yml`（windows-latest，双 preset configure/build/ctest）；host_lifecycle 尊重 `WINFLUX_SKIP_GUI_TESTS`（跳过并打印原因）；AGENTS.md 注明
+- [x] 收口：全 tab 视觉走查 + 双 preset 全绿 + 提交
 
 ## 验收
-- [ ] Menus/Overlays/Layout/Host 中不再有分叉的锚定/卡片/菜单项样板
-- [ ] modal 内 scroll_view 可滚
-- [ ] CI 工作流文件就绪（推送后自动跑）
-- [ ] 双 preset 零警告全绿
+- [x] Menus/Overlays/Layout/Host 中不再有分叉的锚定/卡片/菜单项样板
+- [x] modal 内 scroll_view 可滚
+- [x] CI 工作流文件就绪（推送后自动跑）
+- [x] 双 preset 零警告全绿
