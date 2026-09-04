@@ -7,14 +7,11 @@ on:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    # windows-latest now ships Visual Studio 18; the presets pin the
+    # "Visual Studio 17 2022" generator, so target the image that has it.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-
-      # Puts the runner's MSVC on PATH with vswhere-visible instance
-      # metadata; without it the preset's "Visual Studio 17 2022"
-      # generator can't locate the toolchain.
-      - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure (x64-debug)
         run: cmake --preset x64-debug
