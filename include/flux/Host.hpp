@@ -57,6 +57,8 @@ public:
         std::wstring title = L"WinFlux";
         int width = 960;
         int height = 640;
+        int x = -1;   // -1/-1 => CW_USEDEFAULT (or a restored placement)
+        int y = -1;
     };
 
     Host() noexcept;
@@ -102,6 +104,13 @@ public:
     // Right-click notification (WM_CONTEXTMENU) in logical client units.
     void set_context_menu_handler(std::function<void(float lx, float ly)> h) noexcept {
         context_menu_handler_ = std::move(h);
+    }
+    // WM_CLOSE veto hook (review 2026-10-06 F5): runs while the window is
+    // still alive — the place to persist placement/settings. Return false
+    // to keep the window open (dirty-form confirm); true (or no handler)
+    // proceeds with destruction.
+    void set_close_handler(std::function<bool()> handler) noexcept {
+        close_handler_ = std::move(handler);
     }
 
     [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
@@ -270,8 +279,9 @@ private:
     // Scrollbar auto-hide: hold-end timestamp (WAKE-only timer ticks —
     // frames are only requested once the fade window opens).
     unsigned long long scrollbar_fade_at_ms_ = 0;
-    // App-level hooks (set_key_hook / set_context_menu_handler).
+    // App-level hooks (set_key_hook / set_context_menu_handler / set_close_handler).
     std::function<bool(unsigned vk)> key_hook_;
+    std::function<bool()> close_handler_;
     std::function<void(float, float)> context_menu_handler_;
     // Tracks whether any element had Props.autofocus this frame.
     Path autofocus_path_;

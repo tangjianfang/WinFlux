@@ -6,9 +6,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 
 #include <flux/Components.hpp>
 #include <flux/Damage.hpp>
+#include <flux/Settings.hpp>
 #include <flux/flux.hpp>
 
 using namespace flux;
@@ -1017,6 +1020,56 @@ void test_damage() {
     }
 }
 
+void test_settings() {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / L"winflux_smoke_settings";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::wstring path = (dir / L"settings.ini").wstring();
+
+    // Round-trip: save then load gives back the same pairs.
+    {
+        settings::Kv kv;
+        settings::put(kv, L"theme", L"dark");
+        settings::put_int(kv, L"win_x", 120);
+        settings::put_int(kv, L"win_h", 760);
+        expect(settings::save(path, kv), "settings save succeeds");
+
+        const auto back = settings::load(path);
+        expect(settings::get(back, L"theme") == std::optional<std::wstring>(L"dark"),
+               "string round-trips");
+        expect(settings::get_int(back, L"win_x", -1) == 120, "int round-trips");
+        expect(settings::get_int(back, L"missing", 42) == 42, "missing key falls back");
+    }
+
+    // put() overwrites instead of duplicating.
+    {
+        settings::Kv kv;
+        settings::put_int(kv, L"a", 1);
+        settings::put_int(kv, L"a", 2);
+        expect(kv.size() == 1 && settings::get_int(kv, L"a", 0) == 2,
+               "put overwrites the existing key");
+    }
+
+    // Corrupt tolerance: garbage lines are skipped, not fatal; a missing
+    // file is an empty table.
+    {
+        const std::wstring garbage = (dir / L"garbage.ini").wstring();
+        {
+            std::ofstream out{std::filesystem::path{garbage}, std::ios::binary};
+            out << "not an ini at all\n=no key\nok = yes\r\n#comment\n";
+        }
+        const auto kv = settings::load(garbage);
+        expect(settings::get(kv, L"ok") == std::optional<std::wstring>(L"yes"),
+               "malformed lines skipped, good lines survive");
+        expect(settings::load((dir / L"nope.ini").wstring()).empty(),
+               "missing file is an empty table");
+    }
+
+    fs::remove_all(dir, ec);
+}
+
 } // namespace
 
 int main() {
@@ -1037,6 +1090,7 @@ int main() {
     test_layout_row_grow();
     test_layout_column_center();
     test_damage();
+    test_settings();
 
     if (failures == 0) {
         std::printf("WinFlux smoke test: all checks passed.\n");

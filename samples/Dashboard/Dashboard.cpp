@@ -7,12 +7,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <flux/flux.hpp>
 #include <flux/Components.hpp>
+#include <flux/Settings.hpp>
 
 using namespace flux;
 
@@ -391,8 +393,35 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
 
     Host::Config cfg;
     cfg.title = L"WinFlux Dashboard";
-    cfg.width = 1180;
-    cfg.height = 760;
+    // F5 persistence demo: restore the previous placement + theme (stored in
+    // the temp dir — a real app would use %LOCALAPPDATA%).
+    const std::wstring ini = (std::filesystem::temp_directory_path() /
+                              L"winflux_dashboard.ini").wstring();
+    const settings::Kv saved = settings::load(ini);
+    cfg.width = settings::get_int(saved, L"win_w", 1180);
+    cfg.height = settings::get_int(saved, L"win_h", 760);
+    cfg.x = settings::get_int(saved, L"win_x", -1);
+    cfg.y = settings::get_int(saved, L"win_y", -1);
+    if (settings::get_int(saved, L"theme", 0) == 1) {
+        app.host.set_theme_mode(ThemeMode::dark);
+    }
     if (!app.host.create(cfg, instance)) return 1;
+
+    // Save on close: WM_CLOSE fires while the window still exists, so the
+    // placement is readable. Returning true proceeds with the close.
+    app.host.set_close_handler([&app, ini] {
+        WINDOWPLACEMENT wp{sizeof(WINDOWPLACEMENT)};
+        GetWindowPlacement(app.host.hwnd(), &wp);
+        const RECT& r = wp.rcNormalPosition;
+        settings::Kv kv;
+        settings::put_int(kv, L"win_x", static_cast<int>(r.left));
+        settings::put_int(kv, L"win_y", static_cast<int>(r.top));
+        settings::put_int(kv, L"win_w", static_cast<int>(r.right - r.left));
+        settings::put_int(kv, L"win_h", static_cast<int>(r.bottom - r.top));
+        settings::put_int(kv, L"theme",
+                          app.host.theme_mode() == ThemeMode::dark ? 1 : 0);
+        (void)settings::save(ini, kv);
+        return true;
+    });
     return app.host.run();
 }

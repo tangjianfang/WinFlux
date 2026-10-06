@@ -14,6 +14,7 @@ include(WinFluxCompilerOptions)
 
 add_library(flux STATIC
     src/platform/AppHost.cpp
+    src/platform/Settings.cpp
     src/render/D2DRenderer.cpp
     src/render/DCompPresenter.cpp
     src/render/HwndPresenter.cpp
@@ -62,3 +63,12 @@ add_executable(WinFluxHostLifecycleTest tests/host_lifecycle.cpp)
 target_link_libraries(WinFluxHostLifecycleTest PRIVATE WinFlux::flux)
 flux_apply_compiler_options(WinFluxHostLifecycleTest)
 add_test(NAME WinFluxHostLifecycleTest COMMAND WinFluxHostLifecycleTest)
+
+# Token contract: DESIGN.md <-> include/flux/Theme.hpp must stay in sync
+# (review 2026-10-06, 06-R7 — the third copy lives in the sibling nfui
+# library and is only enforceable by discipline).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME TokenContract
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_tokens.py)
+endif()

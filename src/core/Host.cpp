@@ -254,6 +254,14 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                     return TRUE;
                 }
                 break;
+            case WM_CLOSE:
+                // Veto hook runs while the window is still alive — the
+                // save-on-exit spot (F5). false keeps the window open.
+                if (host->close_handler_) {
+                    const auto handler = host->close_handler_;   // copy: the handler may rebuild state
+                    if (!handler()) return 0;
+                }
+                break;
             case WM_DESTROY:
                 // The window is gone: end run_message_loop's GetMessageW wait.
                 // Without this every WinFlux process lingered as a zombie
@@ -311,7 +319,9 @@ bool Host::create(const Config& config, HINSTANCE instance) noexcept {
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0);
 
     HWND hwnd = CreateWindowExW(0, kClassName, config.title.c_str(),
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                WS_OVERLAPPEDWINDOW,
+                                config.x < 0 ? CW_USEDEFAULT : config.x,
+                                config.y < 0 ? CW_USEDEFAULT : config.y,
                                 rc.right - rc.left, rc.bottom - rc.top,
                                 nullptr, nullptr, instance, this);
     if (hwnd == nullptr) return false;

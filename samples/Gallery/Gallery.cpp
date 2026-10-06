@@ -26,9 +26,13 @@ struct App {
     // Phase A form primitives
     State<std::wstring> input_name;
     State<std::wstring> input_email;
-    // Round 7 form-validation demo state.
+    // Round 7 form-validation demo state. The touched flags gate the error
+    // captions: an untouched empty field must not render red on first paint
+    // (review 2026-10-06 X-5 — validate-on-load was the anti-pattern).
     State<std::wstring> form_name;
     State<std::wstring> form_email;
+    State<bool> form_name_touched;
+    State<bool> form_email_touched;
     State<float> volume;
     State<bool> dark_mode;
     // Phase B pickers
@@ -1799,10 +1803,14 @@ void declare_layer_overlays(App& app) {
 // Round 7 form-validation demo: live validators + error captions.
 ElementPtr form_demo(App& app) {
     const Palette& pal = app.host.palette();
-    const std::wstring name_err =
-        ui::validate_not_empty(app.form_name.get(), L"Name is required");
-    const std::wstring email_err =
-        ui::validate_email(app.form_email.get(), L"Enter a valid email address");
+    // Errors surface only once the field has been edited (touched): an empty
+    // untouched form renders clean; clearing a touched field shows the error.
+    const std::wstring name_err = app.form_name_touched.get()
+        ? ui::validate_not_empty(app.form_name.get(), L"Name is required")
+        : std::wstring();
+    const std::wstring email_err = app.form_email_touched.get()
+        ? ui::validate_email(app.form_email.get(), L"Enter a valid email address")
+        : std::wstring();
 
     Props name_p;
     name_p.input_error = !name_err.empty();
@@ -1812,12 +1820,18 @@ ElementPtr form_demo(App& app) {
     auto form = row_view({
         ui::field(pal, L"Name",
                   text_input(app.form_name.get(),
-                             [&app](std::wstring v) { app.form_name.set(std::move(v)); },
+                             [&app](std::wstring v) {
+                                 app.form_name.set(std::move(v));
+                                 app.form_name_touched.set(true);
+                             },
                              std::move(name_p)),
                   name_err),
         ui::field(pal, L"Email",
                   text_input(app.form_email.get(),
-                             [&app](std::wstring v) { app.form_email.set(std::move(v)); },
+                             [&app](std::wstring v) {
+                                 app.form_email.set(std::move(v));
+                                 app.form_email_touched.set(true);
+                             },
                              std::move(email_p)),
                   email_err),
     }, static_cast<float>(tokens::spacing_md), Align::start);
@@ -2390,6 +2404,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.input_email = app.host.make_state<std::wstring>(L"");
     app.form_name = app.host.make_state<std::wstring>(L"");
     app.form_email = app.host.make_state<std::wstring>(L"");
+    app.form_name_touched = app.host.make_state<bool>(false);
+    app.form_email_touched = app.host.make_state<bool>(false);
     app.volume = app.host.make_state<float>(40.0f);
     app.dark_mode = app.host.make_state<bool>(false);
     app.theme_pick = app.host.make_state<int>(1);
