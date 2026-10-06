@@ -116,6 +116,7 @@ void D2DRenderer::begin(Color clear, const Rect* dirty) noexcept {
         icon_geos_.clear();
         icon_fill_geos_.clear();
         gradients_.clear();
+        bitmaps_.clear();   // WIC-decoded bitmaps are bound to the dead target
         icon_stroke_.Reset();
         last_rt_ = frame_rt_;   // AddRefs; releases the previous (possibly dead) RT
         // The new RT starts with the identity transform; any cached transform
@@ -360,6 +361,96 @@ void D2DRenderer::fill_round_rect_gradient(Rect r, float radius, const Gradient&
     b->SetEndPoint(D2D1::Point2F(r.x + r.w, r.y + r.h * 0.5f));
     const float clamped = std::min(radius, std::min(r.w, r.h) * 0.5f);
     frame_rt_->FillRoundedRectangle(D2D1::RoundedRect(to_rect(r), clamped, clamped), b);
+}
+
+// ---- WIC image support (F10) ----------------------------------------------
+
+namespace {
+// Decode dimensions only — no render target needed, so layout-time
+// intrinsic-size queries work before the first begin().
+[[nodiscard]] bool wic_frame_dims(IWICImagingFactory* factory, const std::wstring& path,
+                                  unsigned& w, unsigned& h) noexcept {
+    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(factory->CreateDecoderFromFilename(
+            path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+            decoder.GetAddressOf()))) {
+        return false;
+    }
+    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, frame.GetAddressOf()))) return false;
+    return SUCCEEDED(frame->GetSize(&w, &h));
+}
+constexpr unsigned kMaxImageSide = 4096;   // decode guard (F10 perf rail)
+} // namespace
+
+std::optional<std::pair<float, float>> D2DRenderer::image_size(
+    const std::wstring& path) noexcept {
+    if (const auto it = image_sizes_.find(path); it != image_sizes_.end()) {
+        return it->second;
+    }
+    if (wic_ == nullptr) {
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                    __uuidof(IWICImagingFactory),
+                                    reinterpret_cast<void**>(wic_.GetAddressOf())))) {
+            return std::nullopt;   // COM not initialized / WIC unavailable
+        }
+    }
+    unsigned w = 0, h = 0;
+    if (!wic_frame_dims(wic_.Get(), path, w, h) || w == 0 || h == 0
+        || w > kMaxImageSide || h > kMaxImageSide) {
+        return std::nullopt;
+    }
+    image_sizes_.emplace(path, std::pair{static_cast<float>(w), static_cast<float>(h)});
+    return image_sizes_.at(path);
+}
+
+void D2DRenderer::draw_image(const std::wstring& path, const Rect& r,
+                             float alpha) noexcept {
+    if (frame_rt_ == nullptr || r.w <= 0.0f || r.h <= 0.0f) return;
+
+    ID2D1Bitmap* bmp = nullptr;
+    if (const auto it = bitmaps_.find(path); it != bitmaps_.end()) {
+        bmp = it->second.Get();
+    } else {
+        const auto dims = image_size(path);
+        if (!dims.has_value()) return;   // undecodable or over the size guard
+        if (wic_ == nullptr) return;
+        Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+        if (FAILED(wic_->CreateDecoderFromFilename(
+                path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+                decoder.GetAddressOf()))) {
+            return;
+        }
+        Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+        if (FAILED(decoder->GetFrame(0, frame.GetAddressOf()))) return;
+        // Convert explicitly to premultiplied BGRA: handing the raw frame
+        // to CreateBitmapFromWicBitmap fails with UNSUPPORTEDPIXELFORMAT for
+        // anything D2D can't consume directly.
+        Microsoft::WRL::ComPtr<IWICFormatConverter> conv;
+        if (FAILED(wic_->CreateFormatConverter(conv.GetAddressOf()))) return;
+        WICPixelFormatGUID dst = GUID_WICPixelFormat32bppPBGRA;
+        if (FAILED(conv->Initialize(frame.Get(), dst, WICBitmapDitherTypeNone,
+                                    nullptr, 0.0, WICBitmapPaletteTypeMedianCut))) {
+            return;
+        }
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> made;
+        const HRESULT hrb = frame_rt_->CreateBitmapFromWicBitmap(conv.Get(), nullptr,
+                                                                 made.GetAddressOf());
+        if (FAILED(hrb)) return;
+        bmp = made.Get();
+        bitmaps_.emplace(path, std::move(made));
+    }
+
+    // Aspect-fit, centred in the target rect.
+    const auto [bw, bh] = bmp->GetSize();
+    if (bw <= 0.0f || bh <= 0.0f) return;
+    const float scale = std::min(r.w / bw, r.h / bh);
+    const float dw = bw * scale;
+    const float dh = bh * scale;
+    frame_rt_->DrawBitmap(bmp,
+                          D2D1::RectF(r.x + (r.w - dw) * 0.5f, r.y + (r.h - dh) * 0.5f,
+                                      r.x + (r.w + dw) * 0.5f, r.y + (r.h + dh) * 0.5f),
+                          std::clamp(alpha, 0.0f, 1.0f));
 }
 
 void D2DRenderer::draw_shadow(Rect r, float radius, int elevation) noexcept {

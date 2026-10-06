@@ -242,6 +242,7 @@ private:
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
     DWORD ui_thread_id_ = 0;   // single-thread invariant; asserted in debug builds
+    bool com_initialized_ = false;   // for WIC image decoding (F10)
     std::function<ElementPtr()> root_builder_;
     ElementPtr tree_;
 

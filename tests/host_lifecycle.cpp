@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <thread>
 
 #include <d3d11.h>
@@ -29,6 +30,92 @@ void check(bool condition, const char* what) {
         ++failures;
     }
 }
+
+    class RecordingPresenter final : public IPresenter {
+    public:
+        bool create(HWND) noexcept override {
+            D3D_FEATURE_LEVEL fl{};
+            if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                                         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                         nullptr, 0, D3D11_SDK_VERSION,
+                                         &d3d_, &fl, nullptr))) {
+                return false;
+            }
+            if (FAILED(d3d_.As(&dxgi_))) return false;
+            // D2D1CreateDevice builds the device + factory pair in one call.
+            if (FAILED(D2D1CreateDevice(dxgi_.Get(), nullptr,
+                                        d2d_device_.GetAddressOf()))) {
+                return false;
+            }
+            if (FAILED(d2d_device_->CreateDeviceContext(
+                           D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_))) {
+                return false;
+            }
+            const D2D1_BITMAP_PROPERTIES1 target_props =
+                D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+                                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+                                        96.0f, 96.0f);
+            if (FAILED(dc_->CreateBitmap(D2D1::SizeU(320, 240), nullptr, 0, &target_props,
+                                         target_.GetAddressOf()))) {
+                return false;
+            }
+            const D2D1_BITMAP_PROPERTIES1 read_props =
+                D2D1::BitmapProperties1(
+                    D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                      D2D1_ALPHA_MODE_PREMULTIPLIED),
+                    96.0f, 96.0f);
+            return SUCCEEDED(dc_->CreateBitmap(D2D1::SizeU(320, 240), nullptr, 0,
+                                               &read_props, staging_.GetAddressOf()));
+        }
+        SurfaceFrame begin_frame(const Rect* dirty) noexcept override {
+            ++frames;
+            if (dirty != nullptr) rects.push_back(*dirty);
+            // The renderer calls BeginDraw on the returned rt itself — a
+            // presenter only prepares the target. The phys* fields feed the
+            // renderer's axis-aligned clip (DXGI pixels); at this target's
+            // fixed 96 DPI they equal the logical dirty rect.
+            dc_->SetTarget(target_.Get());
+            SurfaceFrame f;
+            f.rt = dc_.Get();
+            f.dirty = dirty != nullptr ? *dirty : Rect{};
+            if (dirty != nullptr) {
+                f.physLeft = static_cast<int>(dirty->x);
+                f.physTop = static_cast<int>(dirty->y);
+                f.physWidth = static_cast<unsigned>(dirty->w);
+                f.physHeight = static_cast<unsigned>(dirty->h);
+            } else {
+                f.physWidth = 320;
+                f.physHeight = 240;
+            }
+            return f;
+        }
+        void end_frame() noexcept override {
+            // The renderer already called EndDraw on the context. Mirror the
+            // target into the CPU-readable staging bitmap for assertions.
+            const D2D1_POINT_2U dst{0, 0};
+            const D2D1_RECT_U src{0, 0, 320, 240};
+            (void)staging_->CopyFromRenderTarget(&dst, dc_.Get(), &src);
+            dc_->SetTarget(nullptr);
+        }
+        void resize(unsigned, unsigned) noexcept override {}
+        void set_dpi(float) noexcept override {}
+        [[nodiscard]] bool valid() const noexcept override { return dc_ != nullptr; }
+        // For pixel-level assertions (F10 round-trip): map AFTER end_frame.
+        [[nodiscard]] ID2D1Bitmap1* staging() noexcept { return staging_.Get(); }
+
+        unsigned frames = 0;
+        std::vector<Rect> rects;
+
+    private:
+        Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_;
+        Microsoft::WRL::ComPtr<ID2D1Device> d2d_device_;
+        Microsoft::WRL::ComPtr<ID2D1DeviceContext> dc_;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> target_;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> staging_;
+    };
 
 } // namespace
 
@@ -99,71 +186,12 @@ int main() {
     host.request_render();   // same shape: overlay diff path
     check(host.hwnd() != nullptr, "Host survives scroll_view + overlay round-trips");
 
-    // 06-R4 headless interaction net: an injected presenter that records
-    // every dirty rect and hands back a null render target. The full
-    // build/layout/diff pipeline runs; only the draw is skipped — so the
-    // recorded rects ARE the damage assertions, driven through real
+    // 06-R4 headless interaction net: the injected WARP recording presenter
+    // (RecordingPresenter above) records every dirty rect while the full
+    // build/layout/diff pipeline runs against a real software render target —
+    // the recorded rects ARE the damage assertions, driven through real
     // messages (hover partiality, click dispatch, Tab focus).
     {
-        // Recording presenter backed by a WARP software D2D device context —
-        // a real render target with no hardware and no swapchain, so frames
-        // count as drawn and the diff baseline advances like production.
-        class RecordingPresenter final : public IPresenter {
-        public:
-            bool create(HWND) noexcept override {
-                D3D_FEATURE_LEVEL fl{};
-                if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
-                                             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                             nullptr, 0, D3D11_SDK_VERSION,
-                                             &d3d_, &fl, nullptr))) {
-                    return false;
-                }
-                if (FAILED(d3d_.As(&dxgi_))) return false;
-                // D2D1CreateDevice builds the device + factory pair in one call.
-                if (FAILED(D2D1CreateDevice(dxgi_.Get(), nullptr,
-                                            d2d_device_.GetAddressOf()))) {
-                    return false;
-                }
-                if (FAILED(d2d_device_->CreateDeviceContext(
-                               D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_))) {
-                    return false;
-                }
-                const D2D1_BITMAP_PROPERTIES1 bp =
-                    D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
-                                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                                              D2D1_ALPHA_MODE_PREMULTIPLIED),
-                                            96.0f, 96.0f);
-                return SUCCEEDED(dc_->CreateBitmap(D2D1::SizeU(320, 240), nullptr, 0, &bp,
-                                                   &bitmap_));
-            }
-            SurfaceFrame begin_frame(const Rect* dirty) noexcept override {
-                ++frames;
-                if (dirty != nullptr) rects.push_back(*dirty);
-                dc_->SetTarget(bitmap_.Get());
-                dc_->BeginDraw();
-                SurfaceFrame f;
-                f.rt = dc_.Get();
-                f.dirty = dirty != nullptr ? *dirty : Rect{};
-                return f;
-            }
-            void end_frame() noexcept override {
-                (void)dc_->EndDraw();
-                dc_->SetTarget(nullptr);
-            }
-            void resize(unsigned, unsigned) noexcept override {}
-            void set_dpi(float) noexcept override {}
-            [[nodiscard]] bool valid() const noexcept override { return dc_ != nullptr; }
-
-            unsigned frames = 0;
-            std::vector<Rect> rects;
-
-        private:
-            Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
-            Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_;
-            Microsoft::WRL::ComPtr<ID2D1Device> d2d_device_;
-            Microsoft::WRL::ComPtr<ID2D1DeviceContext> dc_;
-            Microsoft::WRL::ComPtr<ID2D1Bitmap1> bitmap_;
-        };
 
         Host test_host;
         Host::Config test_cfg;
@@ -226,6 +254,108 @@ int main() {
             }
             check(all_partial, "focus change damage is partial");
         }
+    }
+
+    // F10 image round-trip at the PIXEL level: encode an 8x8 red PNG with
+    // WIC, render it through an image element into the WARP target, and
+    // read the target back — the decoded image must actually paint.
+    {
+        const std::wstring png = (std::filesystem::temp_directory_path()
+                                  / L"winflux_f10_red.png").wstring();
+        bool wrote = false;
+        {
+            Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+            if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                           CLSCTX_INPROC_SERVER,
+                                           __uuidof(IWICImagingFactory),
+                                           reinterpret_cast<void**>(factory.GetAddressOf())))) {
+                Microsoft::WRL::ComPtr<IWICStream> stream;
+                Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
+                Microsoft::WRL::ComPtr<IWICBitmap> bmp;
+                HRESULT ha = factory->CreateStream(stream.GetAddressOf());
+                HRESULT hb = stream->InitializeFromFilename(png.c_str(), GENERIC_WRITE);
+                HRESULT hc = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr,
+                                                    encoder.GetAddressOf());
+                HRESULT hd = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+                HRESULT he = factory->CreateBitmap(8, 8, GUID_WICPixelFormat32bppBGRA,
+                                                   WICBitmapCacheOnLoad, bmp.GetAddressOf());
+                if (SUCCEEDED(ha) && SUCCEEDED(hb) && SUCCEEDED(hc) && SUCCEEDED(hd)
+                    && SUCCEEDED(he)) {
+                    Microsoft::WRL::ComPtr<IWICBitmapLock> lock;
+                    const WICRect all{0, 0, 8, 8};
+                    const HRESULT hl = bmp->Lock(&all, WICBitmapLockWrite,
+                                                 lock.GetAddressOf());
+                    if (SUCCEEDED(hl)) {
+                        UINT cb = 0, stride = 0;
+                        BYTE* px = nullptr;
+                        lock->GetStride(&stride);
+                        lock->GetDataPointer(&cb, &px);
+                        std::vector<BYTE> rows(static_cast<size_t>(stride) * 8, 0);
+                        for (int y = 0; y < 8; ++y) {
+                            for (int x = 0; x < 8; ++x) {
+                                BYTE* p = px + y * stride + x * 4;
+                                p[0] = 0; p[1] = 0; p[2] = 255; p[3] = 255;   // opaque red
+                                (void)p;
+                            }
+                            std::memcpy(rows.data() + static_cast<size_t>(y) * stride,
+                                        px + y * stride, 8 * 4);
+                        }
+                        Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
+                        WICPixelFormatGUID pf = GUID_WICPixelFormat32bppBGRA;
+                        wrote = SUCCEEDED(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr))
+                             && SUCCEEDED(frame->Initialize(nullptr))
+                             && SUCCEEDED(frame->SetSize(8, 8))
+                             && SUCCEEDED(frame->SetPixelFormat(&pf))
+                             && SUCCEEDED(frame->WritePixels(8, stride,
+                                                            static_cast<UINT>(rows.size()),
+                                                            rows.data()))
+                             && SUCCEEDED(frame->Commit())
+                             && SUCCEEDED(encoder->Commit());
+                        (void)bmp;   // pixels travel through WritePixels
+                    }
+                }
+            }
+        }
+        if (wrote) {
+            Host img_host;
+            Host::Config img_cfg;
+            img_cfg.title = L"image";
+            img_cfg.width = 200;
+            img_cfg.height = 150;
+            RecordingPresenter rec2;
+            check(rec2.create(nullptr), "second WARP presenter initializes");
+            img_host.set_root_builder([&png] {
+                Props rp;
+                rp.background = rgb(255, 255, 255);
+                rp.padding = {20, 20, 20, 20};
+                Props ip;
+                ip.width = 100.0f;
+                ip.height = 100.0f;
+                return with_children(view(std::move(rp)),
+                                     {image(png, std::move(ip))});
+            });
+            check(img_host.create(img_cfg, GetModuleHandleW(nullptr), &rec2),
+                  "image host creates");
+            img_host.request_render();
+            D2D1_MAPPED_RECT mapped{};
+            if (SUCCEEDED(rec2.staging()->Map(D2D1_MAP_OPTIONS_READ, &mapped))) {
+                int red = 0;
+                for (UINT y = 0; y < 150; ++y) {
+                    for (UINT x = 0; x < 200; ++x) {
+                        const BYTE* p = mapped.bits + y * mapped.pitch + x * 4;
+                        if (p[2] > 200 && p[1] < 100 && p[0] < 100) ++red;
+                    }
+                }
+                rec2.staging()->Unmap();
+                check(red > 50, "image element paints decoded pixels (F10)");
+            } else {
+                check(false, "staging bitmap readable for the pixel check (F10)");
+            }
+        } else {
+            check(false, "WIC PNG encode for the F10 round-trip");
+        }
+        std::error_code ec;
+        std::filesystem::remove(png, ec);
     }
 
     // F1 text-input round-trip through the REAL message path: autofocus

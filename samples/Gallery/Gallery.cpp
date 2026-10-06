@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <algorithm>
+#include <filesystem>
 
 #include <flux/flux.hpp>
 #include <flux/Components.hpp>
@@ -1992,6 +1993,33 @@ ElementPtr components_section(App& app) {
                                  static_cast<float>(tokens::spacing_sm))},
                  static_cast<float>(tokens::spacing_md), Align::start),
         std::move(virt),
+        // F10: image element demo — a real app ships assets next to its
+        // binary; the demo loads %TEMP%\winflux_demo.png when present and
+        // degrades to a hint otherwise.
+        [&] {
+            Props p;
+            p.direction = Direction::row;
+            p.gap = static_cast<float>(tokens::spacing_md);
+            p.align = Align::center;
+            auto row = view(std::move(p));
+            const std::wstring img_path = (std::filesystem::temp_directory_path()
+                                           / L"winflux_demo.png").wstring();
+            std::error_code ec;
+            if (std::filesystem::exists(img_path, ec)) {
+                Props ip;
+                ip.width = 180.0f;
+                ip.height = 110.0f;
+                row->children.push_back(image(img_path, std::move(ip)));
+            } else {
+                Props hp;
+                hp.text = L"Image element: place %TEMP%\\winflux_demo.png to render it here";
+                hp.text_color = pal.text_secondary;
+                hp.font_size_pt = tokens::font_caption;
+                hp.text_align = Align::start;
+                row->children.push_back(label(hp.text, std::move(hp)));
+            }
+            return row;
+        }(),
     }, static_cast<float>(tokens::spacing_md));
     body->props.align = Align::stretch;
     auto card = section_card(L"Components (Round 4)", std::move(body), pal);

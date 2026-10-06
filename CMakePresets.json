@@ -17,11 +17,23 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/out/build/x64-release",
       "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Release" }
+    },
+    {
+      "name": "x64-asan",
+      "displayName": "x64 Debug + AddressSanitizer",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/x64-asan",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug",
+        "CMAKE_CXX_FLAGS": "/fsanitize=address"
+      }
     }
   ],
   "buildPresets": [
     { "name": "x64-debug", "configurePreset": "x64-debug", "configuration": "Debug" },
-    { "name": "x64-release", "configurePreset": "x64-release", "configuration": "Release" }
+    { "name": "x64-release", "configurePreset": "x64-release", "configuration": "Release" },
+    { "name": "x64-asan", "configurePreset": "x64-asan", "configuration": "Debug" }
   ],
   "testPresets": [
     {
@@ -34,6 +46,12 @@
       "name": "x64-release",
       "configurePreset": "x64-release",
       "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "x64-asan",
+      "configurePreset": "x64-asan",
+      "configuration": "Debug",
       "output": { "outputOnFailure": true }
     }
   ]

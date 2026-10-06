@@ -82,6 +82,7 @@ struct Props {
     std::optional<Gradient> background_gradient;   // wins over background
     int shadow_elevation = 0;                      // 0..3 hand-drawn falloff
     std::optional<IconKind> icon;                  // icon element payload, or inline glyph on button/label
+    std::optional<std::wstring> image_path;        // image element payload: WIC-decoded file (F10)
     // Escape hatch for compositions that need arbitrary drawing (charts,
     // gauges, ...). Called at render time with the element's laid-out rect
     // (logical units) after background/border, before children. Hovered
@@ -166,6 +167,7 @@ struct Props {
             && background_gradient == o.background_gradient
             && shadow_elevation == o.shadow_elevation
             && icon == o.icon
+            && image_path == o.image_path
             && paint_id == o.paint_id
             && text == o.text
             && font_size_pt == o.font_size_pt
@@ -211,6 +213,9 @@ using ElementPtr = std::shared_ptr<Element>;
                                   std::function<void(bool)> on_change, Props p = {});
 [[nodiscard]] ElementPtr progress(float value, Props p = {});
 [[nodiscard]] ElementPtr icon(IconKind kind, Props p = {});
+// WIC-decoded image (PNG/JPEG/...), aspect-fit centred in the element rect.
+// Needs COM on the thread — Host::create initializes it.
+[[nodiscard]] ElementPtr image(std::wstring path, Props p = {});
 // Vertical scroll viewport. `content` is laid out at natural height inside
 // the (Props/parent-sized) viewport and clipped; the Host owns the scroll
 // offset keyed by the element's path. Single-child contract.

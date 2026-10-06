@@ -69,6 +69,14 @@ ElementPtr progress(float value, Props p) {
     return make(L"progress", std::move(p));
 }
 
+ElementPtr image(std::wstring path, Props p) {
+    // F10: WIC-decoded file, drawn aspect-fit. Intrinsic size comes from the
+    // decoded dimensions (see measure_leaf); an undecodable path measures
+    // 64x64 and draws nothing.
+    p.image_path = std::move(path);
+    return make(L"image", std::move(p));
+}
+
 ElementPtr icon(IconKind kind, Props p) {
     p.icon = kind;
     if (!p.width.has_value()) p.width = 24.0f;
@@ -310,12 +318,20 @@ void Host::destroy() noexcept {
         DestroyWindow(hwnd_);
         hwnd_ = nullptr;
     }
+    if (com_initialized_) {
+        CoUninitialize();
+        com_initialized_ = false;
+    }
 }
 
 bool Host::create(const Config& config, HINSTANCE instance,
                   IPresenter* external_presenter) noexcept {
     instance_ = instance;
     ui_thread_id_ = GetCurrentThreadId();   // single-thread invariant (R6)
+    // WIC image decoding (F10) needs COM on the UI thread; D2D/DWrite/DComp
+    // themselves do not. Balanced in destroy().
+    com_initialized_ = SUCCEEDED(CoInitializeEx(
+        nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1502,6 +1518,12 @@ void Host::paint_frame() {
                 // 2.5.8; the box itself is 18 — review 2026-10-06 X-7).
                 return {box + tokens::spacing_sm + tw, std::max(24.0f, std::max(box, th))};
             }
+            if (e.type == L"image" && e.props.image_path.has_value()) {
+                const auto dims = renderer_.image_size(*e.props.image_path);
+                const float iw = dims.has_value() ? dims->first : 64.0f;
+                const float ih = dims.has_value() ? dims->second : 64.0f;
+                return {e.props.width.value_or(iw), e.props.height.value_or(ih)};
+            }
             // Leaf views with no text (bars, spacers, avatars, decorative
             // rectangles) still have an intrinsic size when width/height is
             // explicit — without falling back to those, parents walking the
@@ -1937,6 +1959,12 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
             renderer_.fill_round_rect(Rect{e.x, e.y, fill_w, e.h}, p.radius, pal.accent, op);
             renderer_.pop_clip();
         }
+    } else if (e.type == L"image" && p.image_path.has_value()) {
+        renderer_.draw_image(*p.image_path,
+                             Rect{r.x + p.padding.left, r.y + p.padding.top,
+                                  r.w - p.padding.left - p.padding.right,
+                                  r.h - p.padding.top - p.padding.bottom},
+                             op);
     } else if (e.type == L"text_input") {
         const bool is_focused = path == focused_input_path_;
         const Color bg = is_focused && p.enabled ? pal.surface

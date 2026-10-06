@@ -10,8 +10,10 @@
 
 #include <d2d1.h>
 #include <dwrite.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -49,6 +51,15 @@ public:
 
     void fill_rect(Rect r, Color c) noexcept;
     void fill_round_rect(Rect r, float radius, Color c, float alpha = 1.0f) noexcept;
+    // Decodes `path` via WIC on first use and caches per device (device loss
+    // clears the cache). Draws aspect-fit, centred in `r`. Requires COM on
+    // the thread — Host::create initializes it. Images larger than 4096 px
+    // on a side are refused (draws nothing) to keep decode off the hot path.
+    void draw_image(const std::wstring& path, const Rect& r, float alpha = 1.0f) noexcept;
+    // Intrinsic pixel size of `path` (WIC decode, cached, render-target
+    // independent — usable during layout). nullopt when undecodable.
+    [[nodiscard]] std::optional<std::pair<float, float>> image_size(
+        const std::wstring& path) noexcept;
     void draw_round_rect(Rect r, float radius, Color c, float stroke_width,
                          float alpha = 1.0f) noexcept;
     void draw_line(float x1, float y1, float x2, float y2, Color c,
@@ -125,6 +136,12 @@ private:
     // Icon geometries keyed by IconKind (stroke outline + fill accents).
     std::unordered_map<int, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> icon_geos_;
     std::unordered_map<int, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> icon_fill_geos_;
+    // WIC image support (F10): lazily-created factory, per-device bitmaps
+    // (cleared when the render target identity changes), and target-
+    // independent decoded sizes for layout-time queries.
+    Microsoft::WRL::ComPtr<IWICImagingFactory> wic_;
+    std::unordered_map<std::wstring, Microsoft::WRL::ComPtr<ID2D1Bitmap>> bitmaps_;
+    std::unordered_map<std::wstring, std::pair<float, float>> image_sizes_;
     // Gradient brushes keyed by (from,to) colour pair.
     std::unordered_map<unsigned long long,
                        Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush>> gradients_;

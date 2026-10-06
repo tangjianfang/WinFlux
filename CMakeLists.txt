@@ -74,3 +74,24 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME TokenContract
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_tokens.py)
 endif()
+
+# MSVC ASan uses a dynamic runtime (clang_rt.asan_dynamic-x86_64.dll) that is
+# NOT on PATH for a plain ctest invocation — copy it next to the test exes so
+# the x64-asan preset runs out of the box (review 2026-10-06, 06-R11).
+if(CMAKE_CXX_FLAGS MATCHES "/fsanitize=address")
+    # VSINSTALLDIR is only set inside a developer prompt — scan the usual
+    # install roots instead so configure-from-anywhere works.
+    file(GLOB _asan_dll
+         "C:/Program Files/Microsoft Visual Studio/2022/*/VC/Tools/MSVC/*/bin/Hostx64/x64/clang_rt.asan_dynamic-x86_64.dll"
+         "$ENV{VSINSTALLDIR}VC/Tools/MSVC/*/bin/Hostx64/x64/clang_rt.asan_dynamic-x86_64.dll")
+    if(_asan_dll)
+        list(GET _asan_dll 0 _asan_dll_copy)
+        foreach(_t WinFluxSmokeTest WinFluxHostLifecycleTest)
+            add_custom_command(TARGET ${_t} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_asan_dll_copy}" "$<TARGET_FILE_DIR:${_t}>")
+        endforeach()
+    else()
+        message(WARNING "ASan runtime DLL not found — tests may fail to launch.")
+    endif()
+endif()
