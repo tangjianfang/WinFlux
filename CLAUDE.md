@@ -78,17 +78,26 @@ exceeds `max_rects` (8). An empty result means **the frame is skipped entirely**
 
 Two things must stay in sync with it, or changes silently fail to repaint:
 
-1. **Interaction state is invisible to the diff.** Hover / pressed / focus live in `Host` paths,
-   not in the element tree, and are applied at render time in `Host::render_element`. Two
-   consecutive trees are byte-identical when only hover moved, so the diff returns empty and
-   nothing redraws. **Every mutation of `hover_path_` / `pressed_path_` / `focus_path_` must set
-   `force_full_dirty_ = true` before `request_render()`.** The same applies to resize, DPI change,
-   and theme fade (which also forces full via `fading_`).
+1. **Interaction state participates in the diff via `DamageTracker::InteractionState`.** Hover /
+   pressed / focus live in `Host` paths, not in the element tree, and are applied at render time
+   in `Host::render_element`. `paint_frame` feeds the diff the previous and next
+   `InteractionState` path triples, so a hover/focus move is a **partial repaint** of just the two
+   elements involved — do **not** set `force_full_dirty_` for interaction changes (that was the
+   pre-InteractionState contract and would waste the partial-repaint win). `force_full_dirty_`
+   remains only for resize and DPI change; theme fade forces full via `fading_`.
+
+   Handler dispatch contract (R-2/R-5, 2026-10-06): **never invoke a `Props` callback in place.**
+   Copy it to the stack first (`const auto on_click = e->props.on_click; on_click();`) — a handler
+   that mutates `State<T>` re-enters `request_render`, which replaces the scene tree and destroys
+   the still-executing closure. Follow it with `ensure_repaint_after_handler(gen)` so handlers
+   that only flip plain app structs (overlay hosts) still repaint.
 
 2. **New paintable `Props` fields must be added to `DamageTracker::paint_props_equal`.** It
    compares an explicit field list. A field you forget is a field whose change never triggers a
    repaint. Layout-only fields (`flex_grow`, `direction`, `padding`, `margin`, `gap`, `align`) are
-   deliberately excluded — they surface as different `x/y/w/h`.
+   deliberately excluded — they surface as different `x/y/w/h`. The same rule applies to
+   `paint_id`: derive it from **every** input your `Props::paint` closure reads, or data changes
+   that leave the id identical will never repaint (see the radar_chart bug, 2026-10-06).
 
 Never compare layout rects before `flex_layout` has run on *both* trees.
 

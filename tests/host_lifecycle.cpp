@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 #include <flux/flux.hpp>
 
@@ -93,6 +94,25 @@ int main() {
     host.request_render();   // overlay set changes 0 -> 1: full dirty path
     host.request_render();   // same shape: overlay diff path
     check(host.hwnd() != nullptr, "Host survives scroll_view + overlay round-trips");
+
+    // Exit path probe (review 2026-10-06 R-3): WM_CLOSE must destroy the
+    // window AND end the message loop (WM_DESTROY -> PostQuitMessage). A
+    // watchdog thread posts a fallback WM_QUIT after 5 s so a regression
+    // shows up as a failed check, not a hung test.
+    {
+        const DWORD main_tid = GetCurrentThreadId();
+        std::thread watchdog([main_tid] {
+            Sleep(5000);
+            PostThreadMessageW(main_tid, WM_QUIT, 0, 0);
+        });
+        watchdog.detach();
+        const ULONGLONG t0 = GetTickCount64();
+        PostMessageW(host.hwnd(), WM_CLOSE, 0, 0);
+        const int loop_result = host.run();
+        const ULONGLONG elapsed = GetTickCount64() - t0;
+        check(loop_result == 0, "run() returns 0 after WM_CLOSE");
+        check(elapsed < 4500, "message loop exits promptly (WM_DESTROY posts WM_QUIT)");
+    }
 
     // Destructor destroys the HWND and tears down the presenter chain.
     if (failures == 0) {

@@ -472,6 +472,19 @@ void test_data_components() {
         expect(desc[0][0] == L"c" && desc[2][0] == L"a", "descending sort");
     }
 
+    // Regression (review 2026-10-06 R-1): a negative sort column means
+    // "unsorted" — it must not index rows[size_t(-1)]. The old guard only
+    // checked the upper bound, so Dashboard's hardcoded -1 corrupted memory
+    // on every frame.
+    {
+        const std::vector<std::vector<std::wstring>> rows = {
+            {L"b", L"2"}, {L"a", L"3"}, {L"c", L"1"}};
+        const auto none = ui::table_sorted(rows, -1, true);
+        expect(none == rows, "negative sort column leaves rows untouched");
+        const auto wide = ui::table_sorted(rows, 99, true);
+        expect(wide == rows, "out-of-range sort column leaves rows untouched");
+    }
+
     // data_table structure: header + rows; selection paints.
     {
         auto t = ui::data_table(pal, {L"Name", L"Qty"},

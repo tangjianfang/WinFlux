@@ -153,6 +153,16 @@ private:
     friend LRESULT CALLBACK host_wndproc(HWND, UINT, WPARAM, LPARAM) noexcept;
 
     void paint_frame() noexcept;
+    // Monotonic invalidation counter — see the dirty_generation_ block below.
+    using Generation = unsigned long long;
+    // Handler-dispatch bookkeeping (review 2026-10-06 R-2/R-5): callbacks are
+    // copied to the stack before invocation — a handler that mutates State<T>
+    // re-enters paint_frame, which replaces the scene tree and would destroy
+    // the std::function still executing. Afterwards, if the handler scheduled
+    // no repaint itself (plain app-struct mutation, no State::set), schedule
+    // one so e.g. an overlay closed via Esc doesn't linger as stale pixels.
+    // The generation snapshot tells the two cases apart for free.
+    void ensure_repaint_after_handler(Generation before) noexcept;
     void handle_mouse_move(int px, int py) noexcept;
     void handle_mouse_leave() noexcept;
     void handle_lbutton_down(int px, int py) noexcept;
@@ -209,7 +219,6 @@ private:
     // match, the frame is a true no-op (no builder, no layout, no diff, no
     // draw) and we can skip everything. State::set, request_render, resize,
     // DPI change, theme fade, and the interaction handlers all bump it.
-    using Generation = unsigned long long;
     // Sentinel ensures the first paint_frame() never matches (last != gen)
     // and so always runs the full pipeline.
     Generation dirty_generation_ = 0;
@@ -289,15 +298,21 @@ private:
     // ---- Frame-timing instrumentation ------------------------------------
     // Per-phase QueryPerformanceCounter deltas + rolling frame counter. In
     // debug builds a one-line summary goes to the debugger every
-    // kFrameTimingInterval frames; in ANY build, setting WINFLUX_PERF_LOG to
-    // a file path appends the same summary there (perf measurement without
-    // attaching a profiler). Zero cost when the env var is unset.
+    // kFrameTimingInterval frames OR every kPerfEmitMs of wall time —
+    // whichever comes first — plus a final partial summary at teardown; in
+    // ANY build, setting WINFLUX_PERF_LOG to a file path appends the same
+    // summary there (perf measurement without attaching a profiler). Zero
+    // cost when the env var is unset. (Time-based emission added in review
+    // 2026-10-06 U-4: sub-120-frame scenarios used to log nothing at all.)
     static constexpr unsigned kFrameTimingInterval = 120;   // ~2s @60fps
-    void log_frame_summary() noexcept;
+    static constexpr unsigned long long kPerfEmitMs = 2000;
+    void log_frame_summary(unsigned long long now_ms) noexcept;
+    void flush_perf_log() noexcept;
     [[nodiscard]] static const char* perf_log_path() noexcept;
     long long qpc_freq_ = 0;
     unsigned frame_counter_ = 0;   // frames that reached the draw
     unsigned skip_counter_ = 0;    // pipeline ran, damage empty, nothing drew
+    unsigned long long perf_emit_ms_ = 0;   // wall clock of the last summary
     long long t_total_ = 0;
     long long t_builder_ = 0;
     long long t_layout_ = 0;

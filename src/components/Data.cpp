@@ -26,9 +26,13 @@ VisibleRange visible_range(float offset_y, float viewport_h, float row_h,
 namespace {
 
 // Sorts a column lexicographically (v1); toggle flips the direction.
+// col < 0 or col >= row width is "no ordering": every comparison returns
+// false and stable_sort leaves the input untouched (regression R-1 — the
+// guard used to check only the upper bound, so a negative column indexed
+// rows[size_t(-1)] and corrupted memory on every frame).
 void sort_rows(std::vector<std::vector<std::wstring>>& rows, int col, bool asc) {
     std::stable_sort(rows.begin(), rows.end(), [col, asc](const auto& a, const auto& b) {
-        if (col >= static_cast<int>(a.size()) || col >= static_cast<int>(b.size()))
+        if (col < 0 || col >= static_cast<int>(a.size()) || col >= static_cast<int>(b.size()))
             return false;
         return asc ? a[static_cast<size_t>(col)] < b[static_cast<size_t>(col)]
                    : b[static_cast<size_t>(col)] < a[static_cast<size_t>(col)];
@@ -40,7 +44,7 @@ void sort_rows(std::vector<std::vector<std::wstring>>& rows, int col, bool asc) 
 std::vector<std::vector<std::wstring>> table_sorted(
     const std::vector<std::vector<std::wstring>>& rows, int col, bool asc) noexcept {
     auto out = rows;
-    sort_rows(out, col, asc);
+    if (col >= 0) sort_rows(out, col, asc);   // col < 0 means "unsorted" — skip entirely
     return out;
 }
 
@@ -94,7 +98,7 @@ ElementPtr data_table(const Palette& pal, std::vector<std::wstring> columns,
         for (const auto& cell : rows[r]) {
             Props cp;
             cp.text = cell;
-            cp.text_color = is_sel ? pal.text : pal.text;
+            cp.text_color = pal.text;
             cp.font_size_pt = tokens::font_body;
             cp.text_align = Align::start;
             cp.flex_grow = 1.0f;

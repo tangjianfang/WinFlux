@@ -253,6 +253,12 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                     return TRUE;
                 }
                 break;
+            case WM_DESTROY:
+                // The window is gone: end run_message_loop's GetMessageW wait.
+                // Without this every WinFlux process lingered as a zombie
+                // after the user closed the window (review 2026-10-06 R-3).
+                PostQuitMessage(0);
+                return 0;
             case WM_NCDESTROY:
                 host->hwnd_ = nullptr;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -272,6 +278,7 @@ Host::Host() noexcept { shown_ = flux::palette(mode_); }
 Host::~Host() { destroy(); }
 
 void Host::destroy() noexcept {
+    flush_perf_log();   // emit any partial-window measurements (U-4)
     if (hwnd_ != nullptr) {
         DestroyWindow(hwnd_);
         hwnd_ = nullptr;
@@ -344,6 +351,15 @@ void Host::request_render() noexcept {
     if (hwnd_ != nullptr) ValidateRect(hwnd_, nullptr);   // clear dirty; avoid a double WM_PAINT
 }
 
+void Host::ensure_repaint_after_handler(Generation before) noexcept {
+    // R-5: handlers that only mutate plain app structs (overlay hosts, for
+    // instance) schedule no paint of their own — without this, an overlay
+    // closed via Esc lingers as stale pixels until unrelated input. If the
+    // handler already went through State::set/request_render, the generation
+    // moved and this is a free no-op.
+    if (dirty_generation_ == before) request_render();
+}
+
 void Host::set_theme_mode(ThemeMode mode) noexcept {
     if (mode == mode_ && !fading_) return;
     mode_ = mode;
@@ -402,9 +418,11 @@ void Host::scroll_to(const Path& sv_path, float offset) noexcept {
     if (hwnd_ != nullptr) SetTimer(hwnd_, anim_timer_id_, anim_tick_ms_, nullptr);
     // Virtualization hook: the scroll_view element (still this frame's
     // tree) observes the offset and can rebuild just the visible window.
+    // Stack-copy first (R-2): the callback may rebuild the tree.
     if (const Element* sv = resolve(sv_path);
         sv != nullptr && sv->props.on_scroll) {
-        sv->props.on_scroll(next);
+        const auto on_scroll = sv->props.on_scroll;
+        on_scroll(next);
     }
     request_render();
 }
@@ -736,12 +754,14 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     // the button, mouse_move translates the thumb. pressed_path_ resolves to
     // the slider; we compute the new value and call on_value_change.
     if (!pressed_path_.empty()) {
+        const Generation drag_gen = dirty_generation_;
         if (const Element* e = resolve(pressed_path_);
             e != nullptr && e->type == L"slider" && e->w > 0.0f
             && e->props.on_value_change) {
             const float t = std::clamp((lx - e->x) / e->w, 0.0f, 1.0f);
             const float v = e->props.slider_min + t * (e->props.slider_max - e->props.slider_min);
-            e->props.on_value_change(v);
+            const auto on_change = e->props.on_value_change;   // R-2: survives a nested rebuild
+            on_change(v);
         } else if (const Element* dh = resolve(pressed_path_);
                    dh != nullptr && dh->type == L"drag_handle" &&
                    dh->props.on_value_change && pressed_path_.size() >= 2) {
@@ -754,10 +774,12 @@ void Host::handle_mouse_move(int px, int py) noexcept {
                 const float span = vert ? parent->h : parent->w;
                 if (span > 0.0f) {
                     const float pos = vert ? (ly - parent->y) : (lx - parent->x);
-                    dh->props.on_value_change(std::clamp(pos / span, 0.0f, 1.0f));
+                    const auto on_change = dh->props.on_value_change;   // R-2
+                    on_change(std::clamp(pos / span, 0.0f, 1.0f));
                 }
             }
         }
+        ensure_repaint_after_handler(drag_gen);
     }
 
     if (path != hover_path_) {
@@ -837,6 +859,12 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
         // pressable too — the slider/drag_handle branches consume it.
         Path walk = path;
         while (!walk.empty()) {
+            // X-1: an overlay root's on_click is "click OUTSIDE to close".
+            // A hit that started deeper inside the overlay (the card body,
+            // a hint row, drawer text) must not bubble up to it — swallow
+            // the click instead of closing. The root itself (scrim /
+            // transparent margin) is still pressed when directly hit.
+            if (walk.size() == 2 && walk[0] == -1 && walk != path) break;
             if (const Element* e = resolve(walk);
                 e != nullptr && e->props.enabled &&
                 (e->props.on_click || e->props.on_value_change)) {
@@ -861,12 +889,14 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
     // jumps the thumb to that x without requiring drag. Slider drag is
     // handled in handle_mouse_move (pressed_path_ anchors the target).
     if (!new_pressed.empty()) {
+        const Generation press_gen = dirty_generation_;
         if (const Element* e = resolve(new_pressed);
             e != nullptr && e->type == L"slider" && e->w > 0.0f
             && e->props.on_value_change) {
             const float t = std::clamp((lx - e->x) / e->w, 0.0f, 1.0f);
             const float v = e->props.slider_min + t * (e->props.slider_max - e->props.slider_min);
-            e->props.on_value_change(v);
+            const auto on_change = e->props.on_value_change;   // R-2: survives a nested rebuild
+            on_change(v);
         } else if (const Element* dh = resolve(new_pressed);
                    dh != nullptr && dh->type == L"drag_handle" &&
                    dh->props.on_value_change && new_pressed.size() >= 2) {
@@ -879,10 +909,12 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
                 const float span = vert ? parent->h : parent->w;
                 if (span > 0.0f) {
                     const float pos = vert ? (ly - parent->y) : (lx - parent->x);
-                    dh->props.on_value_change(std::clamp(pos / span, 0.0f, 1.0f));
+                    const auto on_change = dh->props.on_value_change;   // R-2
+                    on_change(std::clamp(pos / span, 0.0f, 1.0f));
                 }
             }
         }
+        ensure_repaint_after_handler(press_gen);
     }
     // Background click clears focus (target == nullptr OR no interactive
     // ancestor); keyboard activation on a now-blank focus path doesn't work
@@ -934,10 +966,16 @@ void Host::handle_lbutton_up(int px, int py) noexcept {
     if (inside) {
         if (const Element* e = resolve(fired);
             e != nullptr && e->props.on_click && e->props.enabled) {
-            // The handler may mutate state -> rebuild happens next frame.
             last_click_lx_ = to_logical_px(px);
             last_click_ly_ = to_logical_px(py);
-            e->props.on_click();
+            // R-2: stack-copy before invoking — a handler that mutates
+            // State<T> re-enters paint_frame, which replaces the scene tree
+            // and would otherwise destroy the closure mid-execution. R-5:
+            // if it changed nothing repaint-visible, paint anyway.
+            const auto on_click = e->props.on_click;
+            const Generation gen = dirty_generation_;
+            on_click();
+            ensure_repaint_after_handler(gen);
         }
     }
 }
@@ -989,7 +1027,13 @@ void Host::handle_key_down(WPARAM vk) noexcept {
         for (size_t oi = frame_overlays_.size(); oi-- > 0;) {
             const Element* top = frame_overlays_[oi].get();
             if (top != nullptr && top->props.on_click && top->props.enabled) {
-                top->props.on_click();
+                // R-2 copy + R-5 repaint: closing an overlay must be visible
+                // immediately, even when the close handler only flips a plain
+                // app-side struct.
+                const auto on_click = top->props.on_click;
+                const Generation gen = dirty_generation_;
+                on_click();
+                ensure_repaint_after_handler(gen);
                 return;
             }
         }
@@ -1002,7 +1046,10 @@ void Host::handle_key_down(WPARAM vk) noexcept {
             e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
             std::wstring text = e->props.text;
             if (!text.empty()) text.pop_back();
-            e->props.on_text_change(std::move(text));
+            const auto on_change = e->props.on_text_change;   // R-2
+            const Generation gen = dirty_generation_;
+            on_change(std::move(text));
+            ensure_repaint_after_handler(gen);
         }
         return;
     }
@@ -1033,23 +1080,30 @@ void Host::handle_key_down(WPARAM vk) noexcept {
     if (!focus_path_.empty()) {
         if (const Element* fe = resolve(focus_path_);
             fe != nullptr && fe->props.on_key && fe->props.enabled) {
-            fe->props.on_key(static_cast<unsigned>(vk));
+            const auto on_key = fe->props.on_key;   // R-2: survives a nested rebuild
+            const Generation gen = dirty_generation_;
+            on_key(static_cast<unsigned>(vk));
+            ensure_repaint_after_handler(gen);
             return;
         }
     }
 
-    // Text inputs never enter focus_path_ (they steer
-    // focused_input_path_ instead), so navigation keys for handlers
-    // living on an input — the command palette — dispatch here. The
-    // allowlist keeps text-editing keys (backspace via VK_BACK, chars via
-    // WM_CHAR) flowing to the built-in input handling.
+    // Inputs usually reach the user via focused_input_path_ (mouse click,
+    // or Tab now that focus moves steer it). When an input holds only the
+    // edit focus — clicked, not tabbed to — navigation keys for handlers
+    // living on it (the command palette) dispatch here. The allowlist keeps
+    // text-editing keys (backspace via VK_BACK, chars via WM_CHAR) flowing
+    // to the built-in input handling.
     if (!focused_input_path_.empty()) {
         switch (vk) {
         case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
         case VK_RETURN: case VK_PRIOR: case VK_NEXT: {
             if (const Element* fe = resolve(focused_input_path_);
                 fe != nullptr && fe->props.on_key && fe->props.enabled) {
-                fe->props.on_key(static_cast<unsigned>(vk));
+                const auto on_key = fe->props.on_key;   // R-2
+                const Generation gen = dirty_generation_;
+                on_key(static_cast<unsigned>(vk));
+                ensure_repaint_after_handler(gen);
                 return;
             }
             break;
@@ -1069,17 +1123,32 @@ void Host::handle_key_down(WPARAM vk) noexcept {
 
     if (vk == VK_TAB) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        size_t index = 0;
+        // X-3: "not focused yet" must not read as "at order[0]" — forward
+        // Tab starts ON the first element (the old +1-from-nothing skipped
+        // it) and Shift+Tab wraps to the last one.
+        size_t index = order.size();
         for (size_t i = 0; i < order.size(); ++i) {
             if (order[i] == focus_path_) {
                 index = i;
                 break;
             }
         }
-        index = shift ? (index + order.size() - 1) % order.size()
-                      : (index + 1) % order.size();
-        if (focus_path_ != order[index]) {
-            focus_path_ = order[index];
+        const size_t next = index == order.size()
+            ? (shift ? order.size() - 1 : 0)
+            : (shift ? (index + order.size() - 1) % order.size()
+                     : (index + 1) % order.size());
+        if (focus_path_ != order[next]) {
+            focus_path_ = order[next];
+            // Keep the edit focus aligned with the keyboard focus: tabbing
+            // ONTO a text_input routes WM_CHAR/VK_BACK to it (previously
+            // only a mouse click did, so Tab-focused inputs silently ate
+            // keystrokes); tabbing away releases the caret.
+            if (const Element* fe = resolve(focus_path_);
+                fe != nullptr && fe->type == L"text_input") {
+                focused_input_path_ = focus_path_;
+            } else if (!focused_input_path_.empty()) {
+                focused_input_path_.clear();
+            }
             request_render();   // focus ring moved — partial diff covers it
         }
         return;
@@ -1088,7 +1157,10 @@ void Host::handle_key_down(WPARAM vk) noexcept {
     if (vk == VK_SPACE || vk == VK_RETURN) {
         if (const Element* e = resolve(focus_path_);
             e != nullptr && e->props.on_click && e->props.enabled) {
-            e->props.on_click();   // handler-driven render; no force_full_dirty
+            const auto on_click = e->props.on_click;   // R-2: survives a nested rebuild
+            const Generation gen = dirty_generation_;
+            on_click();
+            ensure_repaint_after_handler(gen);
         }
     }
 }
@@ -1104,7 +1176,8 @@ void Host::handle_char(WPARAM ch) noexcept {
         e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
         std::wstring text = e->props.text;
         text.push_back(static_cast<wchar_t>(ch));
-        e->props.on_text_change(std::move(text));
+        const auto on_change = e->props.on_text_change;   // R-2: survives a nested rebuild
+        on_change(std::move(text));
         // Handlers that mutate plain app structs (not State<T>) don't
         // invalidate anything themselves — the palette query would stay
         // stale until an unrelated repaint.
@@ -1276,9 +1349,7 @@ void Host::paint_frame() noexcept {
         // separately from drawn frames so partial-repaint stats stay honest.
         ++skip_counter_;
         t_total_ += qpc() - t_frame_start;
-        if (frame_counter_ + skip_counter_ >= kFrameTimingInterval) {
-            log_frame_summary();
-        }
+        log_frame_summary(GetTickCount64());
         return;
     }
 
@@ -1314,10 +1385,29 @@ void Host::paint_frame() noexcept {
     t_layout_  += t_after_layout - t_after_rect;
     t_damage_  += t_after_damage - t_after_layout;
     t_draw_    += t_end - t_before_draw;
-    if (++frame_counter_ >= kFrameTimingInterval) { log_frame_summary(); }
+    ++frame_counter_;
+    log_frame_summary(GetTickCount64());
 }
 
-void Host::log_frame_summary() noexcept {
+void Host::flush_perf_log() noexcept {
+    // Teardown: a scenario shorter than one interval (or one wall-clock
+    // window) would otherwise leave nothing in the log at all (U-4).
+    if (frame_counter_ + skip_counter_ > 0) log_frame_summary(GetTickCount64());
+}
+
+void Host::log_frame_summary(unsigned long long now_ms) noexcept {
+    // Emit by frame count OR wall time, whichever comes first: count-only
+    // sampling made sub-120-frame scenarios invisible (review 2026-10-06
+    // U-4 — a 35-frame idle probe logged zero lines).
+    if (frame_counter_ + skip_counter_ == 0) return;
+    if (perf_emit_ms_ == 0) {
+        perf_emit_ms_ = now_ms;   // arm the wall-clock window on the first frame
+        return;
+    }
+    const bool by_count = frame_counter_ + skip_counter_ >= kFrameTimingInterval;
+    const bool by_time = now_ms - perf_emit_ms_ >= kPerfEmitMs;
+    if (!by_count && !by_time) return;
+
     // Per-frame averages in milliseconds. builder includes GetClientRect since
     // it's a cheap pre-pass and not separately useful.
     const double total_ms  = qpc_to_ms(qpc_freq_, t_total_);
@@ -1355,6 +1445,7 @@ void Host::log_frame_summary() noexcept {
     t_total_ = t_builder_ = t_layout_ = t_damage_ = t_draw_ = 0;
     frame_counter_ = 0;
     skip_counter_ = 0;
+    perf_emit_ms_ = now_ms;
 }
 
 const char* Host::perf_log_path() noexcept {
@@ -1517,7 +1608,7 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const float track_h = 4.0f;
         const float track_y = r.y + (r.h - track_h) * 0.5f;
         const Color track_c = !p.enabled ? pal.divider
-                          : (path == pressed_path_) ? pal.surface_variant
+                          : (path == pressed_path_) ? pal.accent
                           : pal.surface_variant;
         renderer_.fill_round_rect(Rect{r.x, track_y, r.w, track_h},
                                   track_h * 0.5f, track_c, op);
@@ -1539,7 +1630,7 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const bool is_on = p.checked.value_or(false);
         const Color track_c = !p.enabled ? pal.divider
                           : is_on ? pal.accent
-                          : (path == pressed_path_) ? pal.surface_variant
+                          : (path == pressed_path_) ? pal.text_secondary
                           : pal.surface_variant;
         renderer_.fill_round_rect(r, r.h * 0.5f, track_c, op);
         const float knob_r = (r.h - 4.0f) * 0.5f;

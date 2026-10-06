@@ -2358,7 +2358,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     if (cmd_line != nullptr && *cmd_line != L'\0') {
         try {
             const int parsed = std::wcstol(cmd_line, nullptr, 10);
-            if (parsed >= 0 && parsed <= 7) initial_tab = parsed;
+            if (parsed >= 0 && parsed <= 8) initial_tab = parsed;
         } catch (...) {
             initial_tab = 0;
         }

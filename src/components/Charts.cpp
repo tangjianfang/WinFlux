@@ -344,7 +344,17 @@ ElementPtr radar_chart(const Palette& pal, std::vector<std::wstring> axes,
 
     auto axes_ptr = std::make_shared<std::vector<std::wstring>>(std::move(axes));
     auto series_ptr = std::make_shared<std::vector<std::vector<float>>>(std::move(series));
-    vp.paint_id = 0x5ADA9u ^ static_cast<unsigned>(max_v * 100.0f);
+    // The id must mix EVERY paint input (review 2026-10-06): deriving it from
+    // max_v alone meant data that changed while the maximum held froze the
+    // chart — identical rects, props, and id => empty damage => no repaint.
+    unsigned id = 0x5ADA9u;
+    for (const auto& row : *series_ptr) {
+        for (const float v : row) {
+            id = (id ^ static_cast<unsigned>(std::fabs(v) * 100.0f)) * 16777619u;
+        }
+    }
+    id ^= static_cast<unsigned>(axes_ptr->size()) * 0x9E37u;
+    vp.paint_id = id;
     vp.paint = [pal, axes_ptr, series_ptr, max_v](D2DRenderer& r, float x, float y,
                                                  float w, float h, bool, float, float) {
         const float cx = x + w * 0.5f;
@@ -360,8 +370,6 @@ ElementPtr radar_chart(const Palette& pal, std::vector<std::wstring> axes,
         }
         // Axis spokes + captions.
         for (size_t i = 0; i < n; ++i) {
-            const auto axis = radar_points(std::vector<float>{1.0f, 0.0f}, cx, cy, rad);
-            (void)axis;
             const float deg = 360.0f * static_cast<float>(i) / static_cast<float>(n);
             constexpr float kPi = 3.14159265358979f;
             const float rad_ang = deg * kPi / 180.0f;

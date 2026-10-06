@@ -266,7 +266,10 @@ void overlay_modal(Host& host, ModalHost& mh, const Palette& pal) noexcept {
     scrim_p.justify = Justify::center;
     scrim_p.align = Align::center;
     auto close_it = [&mh] {
-        if (mh.current->on_close) mh.current->on_close();
+        // has_value guard (review 2026-10-06 R-4): with no repaint between
+        // two Esc presses the stale overlay can dispatch close_it twice —
+        // the second run must not dereference the already-reset optional.
+        if (mh.current.has_value() && mh.current->on_close) mh.current->on_close();
         mh.current.reset();
     };
     scrim_p.on_click = close_it;
