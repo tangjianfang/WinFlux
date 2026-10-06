@@ -54,7 +54,11 @@ ElementPtr menu_item_button(const Palette& pal, const std::wstring& text, bool s
     ip.height = height;
     ip.padding = EdgeInsets{pad_h, 0.0f, 0.0f, pad_h};
     ip.on_click = std::move(on_click);
-    return flux::button(text, ip.on_click, std::move(ip));
+    // Move the handler out BEFORE moving the Props: unsequenced argument
+    // evaluation could otherwise copy a moved-from function and produce a
+    // dead menu item (review 2026-10-06 R-9).
+    auto moved_click = std::move(ip.on_click);
+    return flux::button(text, std::move(moved_click), std::move(ip));
 }
 
 ElementPtr caption(const Palette& pal, std::wstring text, Props p) {
@@ -112,8 +116,8 @@ ElementPtr alert(const Palette& pal, AlertKind kind, std::wstring text,
     if (on_dismiss) {
         Props x_p;
         x_p.icon = IconKind::close;
-        x_p.width = 22.0f;
-        x_p.height = 22.0f;
+        x_p.width = 24.0f;   // >= 24px hit target (X-7)
+        x_p.height = 24.0f;
         x_p.text_color = pal.text_secondary;
         x_p.hover_background = pal.surface_hover;
         x_p.radius = static_cast<float>(tokens::radius_sm);
@@ -230,8 +234,8 @@ void overlay_toasts(Host& host, ToastHost& th, const Palette& pal) noexcept {
         // Early-dismiss ×: removes this entry from the host by id.
         Props x_p;
         x_p.icon = IconKind::close;
-        x_p.width = 20.0f;
-        x_p.height = 20.0f;
+        x_p.width = 24.0f;   // >= 24px hit target (X-7)
+        x_p.height = 24.0f;
         x_p.text_color = pal.text_secondary;
         x_p.hover_background = pal.surface_hover;
         x_p.radius = static_cast<float>(tokens::radius_sm);

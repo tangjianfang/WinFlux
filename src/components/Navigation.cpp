@@ -30,6 +30,9 @@ ElementPtr tabs(const Palette& pal, std::vector<std::wstring> labels, int active
         tab_p.font_size_pt = tokens::font_body;
         tab_p.bold = is_active;
         tab_p.text_align = Align::center;
+        tab_p.focusable = true;   // keyboard-reachable (review 2026-10-06 X-2)
+        tab_p.cursor = Cursor::hand;
+        tab_p.hover_background = pal.surface_hover;
         tab_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
         strip->children.push_back(label(labels[i], std::move(tab_p)));
     }
@@ -72,6 +75,8 @@ ElementPtr segmented(const Palette& pal, std::vector<std::wstring> options,
         seg_p.background = is_sel ? std::optional<Color>{pal.accent} : std::nullopt;
         seg_p.font_size_pt = tokens::font_caption;
         seg_p.text_align = Align::center;
+        seg_p.focusable = true;   // keyboard-reachable (review 2026-10-06 X-2)
+        seg_p.cursor = Cursor::hand;
         seg_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
         outer->children.push_back(label(options[i], std::move(seg_p)));
     }
@@ -97,6 +102,9 @@ ElementPtr pagination(const Palette& pal, int current, int total_pages,
         bp.icon = icon_kind;
         bp.text_color = enabled ? pal.text : pal.text_secondary;
         bp.enabled = enabled;
+        bp.focusable = enabled;   // keyboard-reachable (review 2026-10-06 X-2)
+        bp.cursor = Cursor::hand;
+        bp.hover_background = pal.surface_hover;
         bp.on_click = [on_change, next] { if (on_change) on_change(next); };
         return flux::icon(icon_kind, std::move(bp));
     };
@@ -111,6 +119,8 @@ ElementPtr pagination(const Palette& pal, int current, int total_pages,
         pg_p.background = is_cur ? std::optional<Color>{pal.accent} : std::nullopt;
         pg_p.font_size_pt = tokens::font_caption;
         pg_p.text_align = Align::center;
+        pg_p.focusable = true;   // keyboard-reachable (review 2026-10-06 X-2)
+        pg_p.cursor = Cursor::hand;
         pg_p.on_click = [on_change, pg] { if (on_change) on_change(pg); };
         outer->children.push_back(label(std::to_wstring(pg + 1), std::move(pg_p)));
     }
@@ -147,6 +157,8 @@ ElementPtr accordion(const Palette& pal, std::vector<AccordionSection> sections,
                                       static_cast<float>(tokens::spacing_md),
                                       static_cast<float>(tokens::spacing_md)};
         header_p.cursor = Cursor::hand;
+        header_p.focusable = true;   // keyboard-reachable (review 2026-10-06 X-2)
+        header_p.hover_background = pal.surface_hover;
         header_p.on_click = [on_toggle, idx, is_open] {
             if (on_toggle) on_toggle(is_open ? -1 : idx);
         };

@@ -47,6 +47,9 @@ ElementPtr radio_group(const Palette& pal, std::vector<std::wstring> options,
         row_p.direction = Direction::row;
         row_p.align = Align::center;
         row_p.radius = static_cast<float>(tokens::radius_sm);
+        row_p.focusable = true;   // keyboard-reachable options (review 2026-10-06 X-2)
+        row_p.hover_background = pal.surface_hover;
+        row_p.cursor = Cursor::hand;
         auto handler = [on_change, idx] { if (on_change) on_change(idx); };
         row_p.on_click = handler;
         auto row = view(std::move(row_p));
@@ -93,6 +96,8 @@ ElementPtr color_picker(const Palette& pal, std::vector<Color> swatches, int sel
             sw_p.border_color = is_sel ? pal.accent : pal.border;
             sw_p.border_width = is_sel ? 2.5f : 1.0f;
             sw_p.tooltip_text = L"Swatch " + std::to_wstring(idx + 1);
+            sw_p.focusable = true;   // keyboard-reachable swatches (review 2026-10-06 X-2)
+            sw_p.cursor = Cursor::hand;
             sw_p.on_click = [on_change, idx] { if (on_change) on_change(idx); };
             row->children.push_back(view(std::move(sw_p)));
         }
@@ -162,6 +167,8 @@ ElementPtr date_picker(const Palette& pal, int year, int month, int day,
                 cell_p.text_color = is_sel ? pal.on_accent : pal.text;
                 cell_p.background = is_sel ? std::optional<Color>{pal.accent} : std::nullopt;
                 const int captured = cell_day;
+                cell_p.focusable = true;   // keyboard-reachable days (review 2026-10-06 X-2)
+                cell_p.cursor = Cursor::hand;
                 cell_p.on_click = [year, month, captured, on_change] {
                     if (on_change) on_change(year, month, captured);
                 };

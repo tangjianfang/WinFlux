@@ -21,9 +21,12 @@ ElementPtr make_drag_handle(const Palette& pal, bool vertical,
     p.cursor = vertical ? Cursor::size_ns : Cursor::size_we;
     p.tooltip_text = L"Drag to resize";
     auto handle = std::make_shared<Element>();
-    handle->props.drag_vertical = vertical;
     handle->type = L"drag_handle";
     handle->props = std::move(p);
+    // AFTER the move: assigning before it let the Props move-assignment
+    // clobber drag_vertical with its default (false) — vertical splitters
+    // computed on the horizontal axis (review 2026-10-06 R-8).
+    handle->props.drag_vertical = vertical;
     handle->props.on_value_change = std::move(on_value);
     return handle;
 }

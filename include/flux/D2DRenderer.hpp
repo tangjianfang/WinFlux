@@ -42,6 +42,10 @@ public:
     // dirty == nullptr => update the whole client area (full repaint).
     void begin(Color clear, const Rect* dirty) noexcept;
     void end() noexcept;
+    // True between a successful begin() and its end() — a failed BeginDraw
+    // (device lost, surface exhausted) leaves it false so the caller can
+    // skip advancing its diff baseline (review 2026-10-06 R-7).
+    [[nodiscard]] bool frame_active() const noexcept { return frame_rt_ != nullptr; }
 
     void fill_rect(Rect r, Color c) noexcept;
     void fill_round_rect(Rect r, float radius, Color c, float alpha = 1.0f) noexcept;

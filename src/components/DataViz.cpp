@@ -149,6 +149,8 @@ ElementPtr breadcrumbs(const Palette& pal, const std::vector<std::wstring>& item
         if (!is_last) {
             ip.hover_background = pal.surface_variant;
             ip.radius = static_cast<float>(tokens::radius_sm);
+            ip.focusable = true;   // keyboard-reachable crumbs (review 2026-10-06 X-2)
+            ip.cursor = Cursor::hand;
             const int idx = static_cast<int>(i);
             ip.on_click = [on_select, idx] { if (on_select) on_select(idx); };
         }

@@ -3,6 +3,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 
@@ -148,11 +149,11 @@ constexpr wchar_t kClassName[] = L"WinFluxHost";
 
 float ease_in_out(float t) noexcept { return t * t * (3.0f - 2.0f * t); }
 
-// RAII guard for the painting_ re-entrancy flag. paint_frame is noexcept but
-// wndproc catches any exception at the boundary; this guarantees the flag
-// resets on every exit path (gen-check early-return, dirty_rects.empty()
-// return, normal completion, or a throw) without scattering `painting_ = false`
-// at each return site.
+// RAII guard for the painting_ re-entrancy flag. paint_frame may throw (a
+// user builder or paint callback escaping); wndproc catches at the boundary.
+// This guarantees the flag resets on every exit path (gen-check early-return,
+// dirty_rects.empty() return, normal completion, or a throw) without
+// scattering `painting_ = false` at each return site.
 struct PaintScope {
     bool& flag;
     explicit PaintScope(bool& f) noexcept : flag(f) { flag = true; }
@@ -267,7 +268,12 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 break;
             }
         } catch (...) {
-            // Exceptions must never cross the WndProc boundary.
+            // A user callback (builder / on_click / props.paint) threw. The
+            // scene may be half-updated; invalidate so the next paint
+            // rebuilds from current state instead of trusting the last
+            // baseline (R-6 — this catch used to be unreachable: every
+            // callee was noexcept, so any throw terminated the process).
+            (void)host->bump_generation();
         }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -287,6 +293,7 @@ void Host::destroy() noexcept {
 
 bool Host::create(const Config& config, HINSTANCE instance) noexcept {
     instance_ = instance;
+    ui_thread_id_ = GetCurrentThreadId();   // single-thread invariant (R6)
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -330,18 +337,26 @@ bool Host::create(const Config& config, HINSTANCE instance) noexcept {
 
 int Host::run() noexcept { return run_message_loop(); }
 
-void Host::set_root_builder(std::function<ElementPtr()> builder) noexcept {
+void Host::set_root_builder(std::function<ElementPtr()> builder) {
     root_builder_ = std::move(builder);
     request_render();
 }
 
 void Host::overlay(ElementPtr root) noexcept {
     // Only meaningful while the builder runs (paint_frame clears the set
-    // before invoking it); a stray call outside a frame is dropped.
+    // before invoking it); a stray call outside a frame is a programming
+    // error — release builds drop it, debug builds say so (R6).
+    assert((painting_ || root == nullptr) &&
+           "Host::overlay() must be called from inside the root builder");
     if (painting_ && root != nullptr) frame_overlays_.push_back(std::move(root));
 }
 
-void Host::request_render() noexcept {
+void Host::request_render() {
+    // Single-thread invariant: the scene tree, COM devices, and input paths
+    // are UI-thread-only. A cross-thread set()/request_render is a latent
+    // race — catch it in debug builds instead of wondering about the
+    // intermittent corruption later (review 2026-10-06, R6).
+    assert(ui_thread_id_ == 0 || GetCurrentThreadId() == ui_thread_id_);
     // Bump BEFORE the painting_ guard so a state mutation fired from inside
     // a click handler (which runs with painting_ == true and would otherwise
     // early-return here) still invalidates the next paint_frame's baseline.
@@ -351,7 +366,7 @@ void Host::request_render() noexcept {
     if (hwnd_ != nullptr) ValidateRect(hwnd_, nullptr);   // clear dirty; avoid a double WM_PAINT
 }
 
-void Host::ensure_repaint_after_handler(Generation before) noexcept {
+void Host::ensure_repaint_after_handler(Generation before) {
     // R-5: handlers that only mutate plain app structs (overlay hosts, for
     // instance) schedule no paint of their own — without this, an overlay
     // closed via Esc lingers as stale pixels until unrelated input. If the
@@ -360,7 +375,7 @@ void Host::ensure_repaint_after_handler(Generation before) noexcept {
     if (dirty_generation_ == before) request_render();
 }
 
-void Host::set_theme_mode(ThemeMode mode) noexcept {
+void Host::set_theme_mode(ThemeMode mode) {
     if (mode == mode_ && !fading_) return;
     mode_ = mode;
     fade_from_ = shown_;
@@ -394,14 +409,14 @@ void Host::layout_scroll_views(Element& e, const Path& prefix, const LayoutConte
     }
 }
 
-void Host::scroll_by(const Path& sv_path, float delta) noexcept {
+void Host::scroll_by(const Path& sv_path, float delta) {
     auto it = scrolls_.find(sv_path);
     if (it == scrolls_.end()) return;
     const float max_off = std::max(0.0f, it->second.content_h - it->second.viewport_h);
     scroll_to(sv_path, std::clamp(it->second.offset_y + delta, 0.0f, max_off));
 }
 
-void Host::scroll_to(const Path& sv_path, float offset) noexcept {
+void Host::scroll_to(const Path& sv_path, float offset) {
     auto it = scrolls_.find(sv_path);
     if (it == scrolls_.end()) return;
     const float max_off = std::max(0.0f, it->second.content_h - it->second.viewport_h);
@@ -427,7 +442,7 @@ void Host::scroll_to(const Path& sv_path, float offset) noexcept {
     request_render();
 }
 
-void Host::handle_mouse_wheel(int delta, int px, int py) noexcept {
+void Host::handle_mouse_wheel(int delta, int px, int py) {
     // WM_MOUSEWHEEL delivers SCREEN coordinates; everything downstream is
     // client-logical.
     POINT pt{px, py};
@@ -522,7 +537,7 @@ ElementPtr Host::build_tooltip(const std::wstring& text) const noexcept {
     return root;
 }
 
-void Host::handle_timer() noexcept {
+void Host::handle_timer() {
     const unsigned long long now = GetTickCount64();
     if (fading_) {
         const float t = static_cast<float>(now - fade_start_ms_) /
@@ -553,13 +568,13 @@ float Host::to_logical_px(int px) const noexcept {
     return dpi > 0.0f ? static_cast<float>(px) * 96.0f / dpi : static_cast<float>(px);
 }
 
-void Host::handle_size(unsigned width_px, unsigned height_px) noexcept {
+void Host::handle_size(unsigned width_px, unsigned height_px) {
     renderer_.resize(width_px, height_px);
     force_full_dirty_ = true;   // surface geometry changed — diff is meaningless
     request_render();
 }
 
-void Host::handle_dpi_changed(unsigned dpi, const RECT& suggested) noexcept {
+void Host::handle_dpi_changed(unsigned dpi, const RECT& suggested) {
     renderer_.set_dpi(static_cast<float>(dpi));
     if (hwnd_ != nullptr) {
         SetWindowPos(hwnd_, nullptr, suggested.left, suggested.top,
@@ -715,7 +730,7 @@ void Host::collect_focusable(const Element& e, const Path& prefix, std::vector<P
     }
 }
 
-void Host::handle_mouse_move(int px, int py) noexcept {
+void Host::handle_mouse_move(int px, int py) {
     if (!mouse_tracking_) {
         mouse_tracking_ = true;
         TRACKMOUSEEVENT tme{};
@@ -806,7 +821,7 @@ void Host::handle_mouse_move(int px, int py) noexcept {
     }
 }
 
-void Host::handle_mouse_leave() noexcept {
+void Host::handle_mouse_leave() {
     mouse_tracking_ = false;
     if (!hover_path_.empty()) {
         hover_path_.clear();
@@ -814,7 +829,7 @@ void Host::handle_mouse_leave() noexcept {
     }
 }
 
-void Host::handle_lbutton_down(int px, int py) noexcept {
+void Host::handle_lbutton_down(int px, int py) {
     const float lx = to_logical_px(px);
     const float ly = to_logical_px(py);
     Path path;
@@ -931,7 +946,7 @@ void Host::handle_lbutton_down(int px, int py) noexcept {
     }
 }
 
-void Host::handle_lbutton_up(int px, int py) noexcept {
+void Host::handle_lbutton_up(int px, int py) {
     if (hwnd_ != nullptr) ReleaseCapture();
     if (!drag_scroll_.empty()) {
         drag_scroll_.clear();
@@ -1009,13 +1024,13 @@ void Host::apply_autofocus() noexcept {
     }
 }
 
-void Host::handle_contextmenu(int screen_x, int screen_y) noexcept {    if (hwnd_ == nullptr || !context_menu_handler_) return;
+void Host::handle_contextmenu(int screen_x, int screen_y) {    if (hwnd_ == nullptr || !context_menu_handler_) return;
     POINT pt{screen_x, screen_y};
     ScreenToClient(hwnd_, &pt);
     context_menu_handler_(to_logical_px(pt.x), to_logical_px(pt.y));
 }
 
-void Host::handle_key_down(WPARAM vk) noexcept {
+void Host::handle_key_down(WPARAM vk) {
     if (tree_ == nullptr) return;
 
     // App key hook first (command palette Ctrl+K and friends).
@@ -1071,6 +1086,35 @@ void Host::handle_key_down(WPARAM vk) noexcept {
                 case VK_END:   scroll_to(focus_path_, 1.0e9f); return;
                 default: break;
                 }
+            }
+        }
+    }
+
+    // Focused slider: arrows step by 1/10 of the range, Home/End clamp —
+    // the keyboard equivalent of dragging the thumb (review 2026-10-06 X-2).
+    if (!focus_path_.empty()) {
+        if (const Element* fe = resolve(focus_path_);
+            fe != nullptr && fe->type == L"slider" && fe->props.enabled
+            && fe->props.on_value_change) {
+            const float lo = fe->props.slider_min;
+            const float hi = fe->props.slider_max;
+            const float cur = lo + std::clamp(fe->props.slider_value, 0.0f, 1.0f) * (hi - lo);
+            float next = cur;
+            switch (vk) {
+            case VK_LEFT:
+            case VK_DOWN:  next = cur - (hi - lo) / 10.0f; break;
+            case VK_RIGHT:
+            case VK_UP:    next = cur + (hi - lo) / 10.0f; break;
+            case VK_HOME:  next = lo; break;
+            case VK_END:   next = hi; break;
+            default: break;
+            }
+            if (next != cur) {
+                const auto on_change = fe->props.on_value_change;   // R-2
+                const Generation gen = dirty_generation_;
+                on_change(std::clamp(next, lo, hi));
+                ensure_repaint_after_handler(gen);
+                return;
             }
         }
     }
@@ -1165,7 +1209,7 @@ void Host::handle_key_down(WPARAM vk) noexcept {
     }
 }
 
-void Host::handle_char(WPARAM ch) noexcept {
+void Host::handle_char(WPARAM ch) {
     // WM_CHAR delivers UTF-16 code units (wchar_t on Windows). VK_BACK has
     // already been handled in WM_KEYDOWN, and we want printable characters
     // only — reject control codes so a stray WM_CHAR from the keyboard
@@ -1189,7 +1233,7 @@ void Host::handle_char(WPARAM ch) noexcept {
 // Frame pipeline: rebuild -> layout -> paint
 // =====================================================================
 
-void Host::paint_frame() noexcept {
+void Host::paint_frame() {
     // Re-entry / validity guard: a WM_PAINT (or a builder callback that
     // synchronously pumps) must not wipe frame_overlays_ mid-draw, and a
     // frame drawn with an invalid presenter must not advance the paint
@@ -1234,7 +1278,9 @@ void Host::paint_frame() noexcept {
             const auto [tw, th] = renderer_.measure_text(e.props.text, e.props.font_size_pt,
                                                          e.props.bold, wrap_w);
             if (e.type == L"checkbox") {
-                return {box + tokens::spacing_sm + tw, std::max(box, th)};
+                // Whole-row hit target of at least 24 logical px (WCAG
+                // 2.5.8; the box itself is 18 — review 2026-10-06 X-7).
+                return {box + tokens::spacing_sm + tw, std::max(24.0f, std::max(box, th))};
             }
             // Leaf views with no text (bars, spacers, avatars, decorative
             // rectangles) still have an intrinsic size when width/height is
@@ -1358,16 +1404,32 @@ void Host::paint_frame() noexcept {
     // subtrees whose bounds don't intersect the dirty rect, so a partial
     // repaint only visits the elements that actually need new pixels.
     const long long t_before_draw = qpc();
+    bool drew_any = false;
     for (const Rect& dr : dirty_rects) {
         renderer_.begin(shown_.background, &dr);
-        if (tree_ != nullptr) render_element(*tree_, Path{}, dr);
-        for (size_t oi = 0; oi < frame_overlays_.size(); ++oi) {
-            if (frame_overlays_[oi] != nullptr) {
-                render_element(*frame_overlays_[oi],
-                               Path{-1, static_cast<int>(oi)}, dr);
+        if (renderer_.frame_active()) {
+            drew_any = true;
+            if (tree_ != nullptr) render_element(*tree_, Path{}, dr);
+            for (size_t oi = 0; oi < frame_overlays_.size(); ++oi) {
+                if (frame_overlays_[oi] != nullptr) {
+                    render_element(*frame_overlays_[oi],
+                                   Path{-1, static_cast<int>(oi)}, dr);
+                }
             }
         }
         renderer_.end();
+    }
+    if (!drew_any) {
+        // R-7: every BeginDraw failed (device lost, surface exhausted).
+        // Advancing the diff baseline or the generation here would mark the
+        // content as painted when it wasn't — after recovery the diff would
+        // come up empty and the window would show stale pixels until
+        // unrelated input. Leave both untouched; the next paint retries
+        // against the same baseline.
+        ++skip_counter_;
+        t_total_ += qpc() - t_frame_start;
+        log_frame_summary(GetTickCount64());
+        return;
     }
 
     // Snapshots advance AFTER a real draw, so a frame that produced no dirty
@@ -1453,7 +1515,7 @@ const char* Host::perf_log_path() noexcept {
     return (path != nullptr && path[0] != '\0') ? path : nullptr;
 }
 
-void Host::render_element(const Element& e, const Path& path, const Rect& clip) noexcept {
+void Host::render_element(const Element& e, const Path& path, const Rect& clip) {
     const Props& p = e.props;
     const Rect r{e.x, e.y, e.w, e.h};
 

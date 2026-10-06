@@ -67,8 +67,8 @@ public:
     [[nodiscard]] bool create(const Config& config, HINSTANCE instance) noexcept;
     int run() noexcept;   // message loop; returns WM_QUIT exit code
 
-    void set_root_builder(std::function<ElementPtr()> builder) noexcept;
-    void request_render() noexcept;
+    void set_root_builder(std::function<ElementPtr()> builder);
+    void request_render();
 
     // Declarative overlay channel. Call from the root builder for each
     // overlay visible THIS frame (the set resets on every paint_frame).
@@ -111,7 +111,7 @@ public:
         return {last_click_lx_, last_click_ly_};
     }
     [[nodiscard]] ThemeMode theme_mode() const noexcept { return mode_; }
-    void set_theme_mode(ThemeMode mode) noexcept;   // starts 200 ms cross-fade
+    void set_theme_mode(ThemeMode mode);   // starts 200 ms cross-fade
     [[nodiscard]] const Palette& palette() const noexcept { return shown_; }
 
     // useState factory — binds the state to this Host's render invalidation.
@@ -152,7 +152,7 @@ private:
 
     friend LRESULT CALLBACK host_wndproc(HWND, UINT, WPARAM, LPARAM) noexcept;
 
-    void paint_frame() noexcept;
+    void paint_frame();
     // Monotonic invalidation counter — see the dirty_generation_ block below.
     using Generation = unsigned long long;
     // Handler-dispatch bookkeeping (review 2026-10-06 R-2/R-5): callbacks are
@@ -162,22 +162,22 @@ private:
     // no repaint itself (plain app-struct mutation, no State::set), schedule
     // one so e.g. an overlay closed via Esc doesn't linger as stale pixels.
     // The generation snapshot tells the two cases apart for free.
-    void ensure_repaint_after_handler(Generation before) noexcept;
-    void handle_mouse_move(int px, int py) noexcept;
-    void handle_mouse_leave() noexcept;
-    void handle_lbutton_down(int px, int py) noexcept;
-    void handle_lbutton_up(int px, int py) noexcept;
-    void handle_key_down(WPARAM vk) noexcept;
-    void handle_char(WPARAM ch) noexcept;
-    void handle_mouse_wheel(int delta, int px, int py) noexcept;
-    void handle_contextmenu(int screen_x, int screen_y) noexcept;
+    void ensure_repaint_after_handler(Generation before);
+    void handle_mouse_move(int px, int py);
+    void handle_mouse_leave();
+    void handle_lbutton_down(int px, int py);
+    void handle_lbutton_up(int px, int py);
+    void handle_key_down(WPARAM vk);
+    void handle_char(WPARAM ch);
+    void handle_mouse_wheel(int delta, int px, int py);
+    void handle_contextmenu(int screen_x, int screen_y);
     // Applies a scroll delta (or absolute target) to the scroll_view at
     // `sv_path`, clamping to range, arming the auto-hide clock, repainting.
-    void scroll_by(const Path& sv_path, float delta) noexcept;
-    void scroll_to(const Path& sv_path, float offset) noexcept;
-    void handle_size(unsigned width_px, unsigned height_px) noexcept;
-    void handle_dpi_changed(unsigned dpi, const RECT& suggested) noexcept;
-    void handle_timer() noexcept;
+    void scroll_by(const Path& sv_path, float delta);
+    void scroll_to(const Path& sv_path, float offset);
+    void handle_size(unsigned width_px, unsigned height_px);
+    void handle_dpi_changed(unsigned dpi, const RECT& suggested);
+    void handle_timer();
     void update_cursor() noexcept;
     void destroy() noexcept;
 
@@ -192,7 +192,7 @@ private:
     [[nodiscard]] const Element* hit_test(float lx, float ly, Path& path) const noexcept;
     [[nodiscard]] const Element* resolve(const Path& path) const noexcept;
     void collect_focusable(const Element& e, const Path& prefix, std::vector<Path>& out) const noexcept;
-    void render_element(const Element& e, const Path& path, const Rect& clip) noexcept;
+    void render_element(const Element& e, const Path& path, const Rect& clip);
     [[nodiscard]] static bool rects_intersect(const Rect& a, const Rect& b) noexcept;
 
     static bool contains(const Element& e, float lx, float ly) noexcept;
@@ -211,6 +211,7 @@ private:
     ElementPtr prev_tree_;              // previous frame's laid-out scene tree
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
+    DWORD ui_thread_id_ = 0;   // single-thread invariant; asserted in debug builds
     std::function<ElementPtr()> root_builder_;
     ElementPtr tree_;
 

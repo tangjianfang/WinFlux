@@ -80,7 +80,11 @@ ElementPtr data_table(const Palette& pal, std::vector<std::wstring> columns,
                                 static_cast<float>(tokens::spacing_sm)};
         hp.on_click = [on_sort, col] { if (on_sort) on_sort(col); };
         hp.tooltip_text = L"Sort by " + columns[c];
-        head->children.push_back(flux::button(columns[c], hp.on_click, hp));
+        // Move the handler out BEFORE moving the Props: unsequenced
+        // argument evaluation could otherwise copy a moved-from function
+        // and produce a dead header button (review 2026-10-06 R-9).
+        auto on_click = std::move(hp.on_click);
+        head->children.push_back(flux::button(columns[c], std::move(on_click), std::move(hp)));
     }
     root->children.push_back(std::move(head));
 
@@ -93,6 +97,9 @@ ElementPtr data_table(const Palette& pal, std::vector<std::wstring> columns,
         row_p.background = is_sel ? std::optional<Color>{pal.selection}
                                   : (r % 2 == 1 ? std::optional<Color>{pal.surface_variant}
                                                 : std::nullopt);
+        row_p.focusable = true;   // keyboard-reachable rows (review 2026-10-06 X-2)
+        row_p.hover_background = pal.surface_hover;
+        row_p.cursor = Cursor::hand;
         row_p.on_click = [on_select, row_idx] { if (on_select) on_select(row_idx); };
         auto row_view = view(std::move(row_p));
         for (const auto& cell : rows[r]) {
@@ -138,6 +145,7 @@ void push_tree_rows(const Palette& pal, const std::vector<TreeItem>& items,
                                     4.0f, 4.0f, 4.0f};
         row_p.hover_background = pal.surface_hover;
         row_p.radius = static_cast<float>(tokens::radius_sm);
+        row_p.focusable = true;   // keyboard-reachable nodes (review 2026-10-06 X-2)
         row_p.on_click = [on_toggle, on_select, child_path, has_kids] {
             if (has_kids) {
                 if (on_toggle) on_toggle(child_path);
