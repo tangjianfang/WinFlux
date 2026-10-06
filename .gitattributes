@@ -1,0 +1,11 @@
+# Normalize text files to LF in the repository; checkouts follow core.autocrlf.
+# Without this, 25/48 tracked files mixed CRLF and LF and every cross-machine
+# checkout produced phantom diffs (review 2026-10-06, 06-R10).
+* text=auto
+
+# Binaries — never normalize.
+*.png binary
+*.exe binary
+*.lib binary
+*.pdb binary
+*.ico binary
