@@ -14,6 +14,7 @@ include(WinFluxCompilerOptions)
 
 add_library(flux STATIC
     src/platform/AppHost.cpp
+    src/platform/Accessibility.cpp
     src/platform/Clipboard.cpp
     src/platform/Settings.cpp
     src/render/D2DRenderer.cpp
@@ -39,7 +40,8 @@ target_include_directories(flux PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_compile_definitions(flux PUBLIC UNICODE _UNICODE _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(flux PUBLIC d2d1 dwrite windowscodecs dcomp d3d11 dxgi)
+target_link_libraries(flux PUBLIC d2d1 dwrite windowscodecs dcomp d3d11 dxgi imm32
+                      uiautomationcore)
 flux_apply_compiler_options(flux)
 
 add_executable(WinFluxGallery WIN32 samples/Gallery/Gallery.cpp)

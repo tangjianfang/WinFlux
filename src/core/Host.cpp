@@ -1,6 +1,7 @@
 #include <flux/Host.hpp>
 
 #include <windowsx.h>
+#include <imm.h>
 
 #include <algorithm>
 #include <cassert>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <flux/Accessibility.hpp>
 #include <flux/Clipboard.hpp>
 
 #include <flux/FlexLayout.hpp>
@@ -251,6 +253,25 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             case WM_CHAR:
                 host->handle_char(wparam);
                 return 0;
+            case WM_IME_SETCONTEXT:
+                // Let the IME run, but suppress the default composition
+                // window — the composition text renders inline in the
+                // focused text_input (F6).
+                return DefWindowProcW(hwnd, msg, wparam & ~ISC_SHOWUICOMPOSITIONWINDOW,
+                                      lparam);
+            case WM_IME_STARTCOMPOSITION:
+                return 0;   // no default composition window
+            case WM_IME_COMPOSITION:
+                host->handle_ime_composition(lparam);
+                return 0;
+            case WM_IME_ENDCOMPOSITION:
+                host->handle_ime_end_composition();
+                return 0;
+            case WM_IME_NOTIFY:
+                if (wparam == IMN_SETCOMPOSITIONWINDOW) {
+                    host->handle_ime_position();
+                }
+                return 0;
             case WM_MOUSEWHEEL:
                 host->handle_mouse_wheel(static_cast<int>(GET_WHEEL_DELTA_WPARAM(wparam)),
                                          GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
@@ -283,7 +304,17 @@ LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                     if (!handler()) return 0;
                 }
                 break;
+            case WM_GETOBJECT:
+                // UIA L0 (X-12): hand screen readers a window-level provider
+                // so they read the window name instead of nothing.
+                if (lparam == static_cast<LPARAM>(UiaRootObjectId)) {
+                    if (auto* provider = a11y::window_provider(hwnd); provider != nullptr) {
+                        return UiaReturnRawElementProvider(hwnd, wparam, lparam, provider);
+                    }
+                }
+                break;
             case WM_DESTROY:
+                a11y::shutdown_for(hwnd);
                 // The window is gone: end run_message_loop's GetMessageW wait.
                 // Without this every WinFlux process lingered as a zombie
                 // after the user closed the window (review 2026-10-06 R-3).
@@ -991,6 +1022,7 @@ void Host::handle_lbutton_down(int px, int py) {
         press_change_ms_ = GetTickCount64();
         animate_for(static_cast<unsigned>(tokens::motion_fast_ms));
         if (hwnd_ != nullptr && !pressed_path_.empty()) SetCapture(hwnd_);
+        a11y::notify_focus(hwnd_);   // click focus is announced too (X-12)
         request_render();
     }
 }
@@ -1394,6 +1426,7 @@ void Host::handle_key_down(WPARAM vk) {
             } else if (!focused_input_path_.empty()) {
                 focused_input_path_.clear();
             }
+            a11y::notify_focus(hwnd_);   // screen readers follow the move (X-12)
             request_render();   // focus ring moved — partial diff covers it
         }
         return;
@@ -1434,6 +1467,91 @@ size_t Host::caret_from_x(const Element& e, float x) noexcept {
         }
     }
     return best;
+}
+
+void Host::handle_ime_composition(LPARAM lparam) {
+    // Inline composition (F6): the in-progress string renders as underlined
+    // ghost text in the focused input; the committed result appends
+    // through the normal on_text_change path. Composition state is
+    // Host-side (like the caret) — invisible to the tree diff, so the
+    // repaint is forced.
+    if (hwnd_ == nullptr) return;
+    if (focused_input_path_.empty()) return;
+    HIMC imc = ImmGetContext(hwnd_);
+    if (imc == nullptr) return;
+
+    bool changed = false;
+    if ((lparam & GCS_RESULTSTR) != 0) {
+        const int bytes = ImmGetCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
+        if (bytes > 0) {
+            std::wstring result(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
+            ImmGetCompositionStringW(imc, GCS_RESULTSTR, result.data(), bytes);
+            if (const Element* e = resolve(focused_input_path_);
+                e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
+                const auto [lo, hi] = input_sel_range();
+                const size_t clo = std::min(lo, e->props.text.size());
+                const size_t chi = std::min(hi, e->props.text.size());
+                std::wstring text = e->props.text.substr(0, clo) + result
+                                  + e->props.text.substr(chi);
+                input_caret_ = input_anchor_ = clo + result.size();
+                const auto on_change = e->props.on_text_change;   // R-2
+                const Generation gen = dirty_generation_;
+                ime_composition_.clear();
+                on_change(std::move(text));
+                ensure_repaint_after_handler(gen);
+                changed = true;
+            }
+        } else {
+            ime_composition_.clear();
+            changed = true;
+        }
+    }
+    if ((lparam & GCS_COMPSTR) != 0) {
+        const int bytes = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0);
+        ime_composition_.assign(static_cast<size_t>(std::max(0, bytes)) / sizeof(wchar_t),
+                                L'\0');
+        if (bytes > 0) {
+            ImmGetCompositionStringW(imc, GCS_COMPSTR, ime_composition_.data(), bytes);
+        }
+        changed = true;
+    }
+    ImmReleaseContext(hwnd_, imc);
+    if (changed) {
+        force_full_dirty_ = true;   // composition is render-time state
+        request_render();
+    }
+}
+
+void Host::handle_ime_end_composition() {
+    if (!ime_composition_.empty()) {
+        ime_composition_.clear();
+        force_full_dirty_ = true;
+        request_render();
+    }
+}
+
+void Host::handle_ime_position() {
+    // Pin the IME's own windows (candidate list, remaining composition UI)
+    // to the caret of the focused input, in screen coordinates.
+    if (hwnd_ == nullptr || focused_input_path_.empty()) return;
+    const Element* e = resolve(focused_input_path_);
+    if (e == nullptr || e->type != L"text_input") return;
+    HIMC imc = ImmGetContext(hwnd_);
+    if (imc == nullptr) return;
+    const std::wstring shown = e->props.masked
+        ? std::wstring(e->props.text.size(), L'●') + ime_composition_
+        : e->props.text + ime_composition_;
+    const size_t caret = std::min(input_caret_ + ime_composition_.size(), shown.size());
+    const auto [tw, th] = renderer_.measure_text(shown.substr(0, caret),
+                                                 e->props.font_size_pt, false);
+    POINT pt{static_cast<LONG>(e->x + e->props.padding.left + tw),
+             static_cast<LONG>(e->y + (e->h - th) * 0.5f)};
+    ClientToScreen(hwnd_, &pt);
+    COMPOSITIONFORM cf{};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos = pt;
+    ImmSetCompositionWindow(imc, &cf);
+    ImmReleaseContext(hwnd_, imc);
 }
 
 void Host::handle_char(WPARAM ch) {
@@ -1998,6 +2116,19 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         } else if (!p.placeholder.empty()) {
             renderer_.draw_text(text_r, p.placeholder, p.font_size_pt, pal.text_secondary,
                                 false, Align::start, op);
+        }
+        // IME inline composition (F6): underlined ghost text after the real
+        // content; the caret follows it while composing.
+        if (is_focused && p.enabled && !ime_composition_.empty()) {
+            const auto [tw, th] = renderer_.measure_text(shown, p.font_size_pt, false);
+            const Rect comp_r{text_r.x + tw, r.y,
+                              text_r.w - tw, r.h};
+            renderer_.draw_text(comp_r, ime_composition_, p.font_size_pt, tc, false,
+                                Align::start, op);
+            const auto [cw, ch2] = renderer_.measure_text(ime_composition_,
+                                                          p.font_size_pt, false);
+            renderer_.fill_rect(Rect{comp_r.x, comp_r.y + r.h * 0.5f + th * 0.5f - 2.0f,
+                                     cw, 1.5f}, pal.accent);
         }
         // Caret: thin accent line at the caret index. No blink animation in
         // this pass — a blink must dirty only the input's rect (partial

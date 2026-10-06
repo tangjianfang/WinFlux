@@ -358,6 +358,18 @@ int main() {
         std::filesystem::remove(png, ec);
     }
 
+    // F6: IME messages with no real IME / no focused input must be inert
+    // (synthetic composition carries no ImmGetContext data — the handler
+    // degrades to a no-op instead of touching state).
+    {
+        SendMessageW(host.hwnd(), WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL);
+        SendMessageW(host.hwnd(), WM_IME_STARTCOMPOSITION, 0, 0);
+        SendMessageW(host.hwnd(), WM_IME_COMPOSITION, 0, GCS_COMPSTR);
+        SendMessageW(host.hwnd(), WM_IME_ENDCOMPOSITION, 0, 0);
+        SendMessageW(host.hwnd(), WM_IME_NOTIFY, IMN_SETCOMPOSITIONWINDOW, 0);
+        check(host.hwnd() != nullptr, "IME message paths are inert without an IME");
+    }
+
     // F1 text-input round-trip through the REAL message path: autofocus
     // steers focused_input_path_ during paint_frame, then WM_CHAR /
     // VK_BACK dispatch synchronously (SendMessage) into handle_char /

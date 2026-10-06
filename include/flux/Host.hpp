@@ -194,6 +194,12 @@ private:
     void handle_lbutton_up(int px, int py);
     void handle_key_down(WPARAM vk);
     void handle_char(WPARAM ch);
+    // IME inline composition (F6): comp string renders as underlined ghost
+    // text in the focused input; committed results flow through
+    // on_text_change; the IME's own windows pin to the caret.
+    void handle_ime_composition(LPARAM lparam);
+    void handle_ime_end_composition();
+    void handle_ime_position();
     // Sorted [lo, hi) selection window of the focused input (F1).
     [[nodiscard]] std::pair<size_t, size_t> input_sel_range() const noexcept;
     // Caret index whose rendered boundary is nearest to client-logical x.
@@ -327,6 +333,7 @@ private:
     // force one full dirty frame (typing itself diffs through Props.text).
     size_t input_caret_ = 0;
     size_t input_anchor_ = 0;
+    std::wstring ime_composition_;   // in-progress IME string (F6)
     // Snapshots of the above from the previous paint_frame, used to feed the
     // damage diff so hover/press/focus changes produce partial repaints
     // instead of being forced into a fullscreen update.
