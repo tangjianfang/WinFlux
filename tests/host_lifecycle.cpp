@@ -9,6 +9,10 @@
 #include <cstdlib>
 #include <thread>
 
+#include <d3d11.h>
+#include <d2d1_1.h>
+#include <wrl/client.h>
+
 #include <flux/flux.hpp>
 
 using namespace flux;
@@ -94,6 +98,135 @@ int main() {
     host.request_render();   // overlay set changes 0 -> 1: full dirty path
     host.request_render();   // same shape: overlay diff path
     check(host.hwnd() != nullptr, "Host survives scroll_view + overlay round-trips");
+
+    // 06-R4 headless interaction net: an injected presenter that records
+    // every dirty rect and hands back a null render target. The full
+    // build/layout/diff pipeline runs; only the draw is skipped — so the
+    // recorded rects ARE the damage assertions, driven through real
+    // messages (hover partiality, click dispatch, Tab focus).
+    {
+        // Recording presenter backed by a WARP software D2D device context —
+        // a real render target with no hardware and no swapchain, so frames
+        // count as drawn and the diff baseline advances like production.
+        class RecordingPresenter final : public IPresenter {
+        public:
+            bool create(HWND) noexcept override {
+                D3D_FEATURE_LEVEL fl{};
+                if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                                             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                             nullptr, 0, D3D11_SDK_VERSION,
+                                             &d3d_, &fl, nullptr))) {
+                    return false;
+                }
+                if (FAILED(d3d_.As(&dxgi_))) return false;
+                // D2D1CreateDevice builds the device + factory pair in one call.
+                if (FAILED(D2D1CreateDevice(dxgi_.Get(), nullptr,
+                                            d2d_device_.GetAddressOf()))) {
+                    return false;
+                }
+                if (FAILED(d2d_device_->CreateDeviceContext(
+                               D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_))) {
+                    return false;
+                }
+                const D2D1_BITMAP_PROPERTIES1 bp =
+                    D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+                                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                              D2D1_ALPHA_MODE_PREMULTIPLIED),
+                                            96.0f, 96.0f);
+                return SUCCEEDED(dc_->CreateBitmap(D2D1::SizeU(320, 240), nullptr, 0, &bp,
+                                                   &bitmap_));
+            }
+            SurfaceFrame begin_frame(const Rect* dirty) noexcept override {
+                ++frames;
+                if (dirty != nullptr) rects.push_back(*dirty);
+                dc_->SetTarget(bitmap_.Get());
+                dc_->BeginDraw();
+                SurfaceFrame f;
+                f.rt = dc_.Get();
+                f.dirty = dirty != nullptr ? *dirty : Rect{};
+                return f;
+            }
+            void end_frame() noexcept override {
+                (void)dc_->EndDraw();
+                dc_->SetTarget(nullptr);
+            }
+            void resize(unsigned, unsigned) noexcept override {}
+            void set_dpi(float) noexcept override {}
+            [[nodiscard]] bool valid() const noexcept override { return dc_ != nullptr; }
+
+            unsigned frames = 0;
+            std::vector<Rect> rects;
+
+        private:
+            Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
+            Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_;
+            Microsoft::WRL::ComPtr<ID2D1Device> d2d_device_;
+            Microsoft::WRL::ComPtr<ID2D1DeviceContext> dc_;
+            Microsoft::WRL::ComPtr<ID2D1Bitmap1> bitmap_;
+        };
+
+        Host test_host;
+        Host::Config test_cfg;
+        test_cfg.title = L"recording";
+        test_cfg.width = 320;
+        test_cfg.height = 240;
+        RecordingPresenter rec;
+        check(rec.create(nullptr),
+              "WARP recording presenter initializes (test-side create)");
+        bool clicked = false;
+        test_host.set_root_builder([&test_host, &clicked] {
+            Props root_p;
+            root_p.direction = Direction::column;
+            root_p.gap = 8.0f;
+            root_p.padding = {16, 16, 16, 16};
+            root_p.align = Align::start;   // natural child sizes (no stretch)
+            auto root = view(std::move(root_p));
+            Props one_p;
+            one_p.width = 140.0f;
+            one_p.height = 32.0f;
+            root->children.push_back(button(L"Click me one",
+                                            [&clicked] { clicked = true; },
+                                            std::move(one_p)));
+            Props two_p;
+            two_p.width = 140.0f;
+            two_p.height = 32.0f;
+            root->children.push_back(button(L"Click me two", [] {}, std::move(two_p)));
+            return root;
+        });
+        check(test_host.create(test_cfg, GetModuleHandleW(nullptr), &rec),
+              "create accepts an external presenter (06-R4 seam)");
+        rec.rects.clear();   // drop the baseline (fullscreen) paint
+
+        // Hover over the first button: damage must be PARTIAL (the button's
+        // rect), never the whole client area.
+        SendMessageW(test_host.hwnd(), WM_MOUSEMOVE, 0, MAKELPARAM(60, 30));
+        check(!rec.rects.empty(), "hover produces a damage rect");
+        {
+            bool all_partial = true;
+            for (const Rect& r : rec.rects) {
+                if (r.w * r.h > 320.0f * 240.0f * 0.9f) all_partial = false;
+            }
+            check(all_partial, "hover damage is partial, not fullscreen");
+        }
+
+        // Real click through WM_LBUTTONDOWN/UP dispatches on_click.
+        SendMessageW(test_host.hwnd(), WM_LBUTTONDOWN, MK_LBUTTON,
+                     MAKELPARAM(60, 30));
+        SendMessageW(test_host.hwnd(), WM_LBUTTONUP, 0, MAKELPARAM(60, 30));
+        check(clicked, "button on_click fires through the message path");
+
+        // Tab moves focus to the second button: partial damage again.
+        rec.rects.clear();
+        SendMessageW(test_host.hwnd(), WM_KEYDOWN, VK_TAB, 0);
+        check(!rec.rects.empty(), "Tab repaints the focus ring change");
+        {
+            bool all_partial = true;
+            for (const Rect& r : rec.rects) {
+                if (r.w * r.h > 320.0f * 240.0f * 0.9f) all_partial = false;
+            }
+            check(all_partial, "focus change damage is partial");
+        }
+    }
 
     // F1 text-input round-trip through the REAL message path: autofocus
     // steers focused_input_path_ during paint_frame, then WM_CHAR /

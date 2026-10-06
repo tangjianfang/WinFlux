@@ -326,9 +326,9 @@ ElementPtr build(App& app) {
     Host& host = app.host;
     ui::overlay_toasts(host, app.toast_host, pal);
     ui::overlay_command_palette(host, app.cmd_host, pal,
-        {ui::CommandItem{L"Go to Overview", [&app] { app.nav.set(0); }},
-         ui::CommandItem{L"Go to Logs", [&app] { app.nav.set(2); }},
-         ui::CommandItem{L"Go to Settings", [&app] { app.nav.set(4); }},
+        {ui::CommandItem{L"Go to Overview", [&app] { app.nav.set(0); }, L"Ctrl+1"},
+         ui::CommandItem{L"Go to Logs", [&app] { app.nav.set(2); }, L"Ctrl+3"},
+         ui::CommandItem{L"Go to Settings", [&app] { app.nav.set(4); }, L"Ctrl+5"},
          ui::CommandItem{L"Push healthy toast", [&app] {
              ui::toast_show(app.toast_host, ui::ToastKind::success, L"All systems nominal");
          }},
@@ -336,7 +336,7 @@ ElementPtr build(App& app) {
              app.host.set_theme_mode(app.host.theme_mode() == ThemeMode::light
                                          ? ThemeMode::dark
                                          : ThemeMode::light);
-         }}});
+         }, L"Ctrl+T"}});
     if (app.selected_server.get() >= 0 &&
         app.selected_server.get() < static_cast<int>(kServers.size())) {
         const auto& srv = kServers[static_cast<size_t>(app.selected_server.get())];
@@ -390,6 +390,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
         }
         return false;
     });
+    // F7 hotkey registry demo: Ctrl+1..5 jump pages, Ctrl+T toggles the
+    // theme — the same commands the palette offers, with their hints.
+    for (int page = 0; page < 5; ++page) {
+        Host::Hotkey hk;
+        hk.vk = static_cast<unsigned>('1' + page);
+        hk.ctrl = true;
+        app.host.add_hotkey(hk, [&app, page] { app.nav.set(page); },
+                            L"Ctrl+" + std::to_wstring(page + 1));
+    }
+    {
+        Host::Hotkey hk;
+        hk.vk = 'T';
+        hk.ctrl = true;
+        app.host.add_hotkey(hk, [&app] {
+            app.host.set_theme_mode(app.host.theme_mode() == ThemeMode::light
+                                        ? ThemeMode::dark
+                                        : ThemeMode::light);
+        }, L"Ctrl+T");
+    }
 
     Host::Config cfg;
     cfg.title = L"WinFlux Dashboard";

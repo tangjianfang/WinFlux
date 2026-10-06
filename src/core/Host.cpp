@@ -169,6 +169,16 @@ struct PaintScope {
 // rest of the code reads as `qpc()` -> long long. Compiled in ALL configs:
 // measurement is a handful of QPC calls, and WINFLUX_PERF_LOG needs it in
 // release builds (where the numbers are honest).
+// Debug HUD switch: opt-in via WINFLUX_DEBUG_HUD=1 (any build, zero cost
+// when unset — one getenv at first paint).
+[[nodiscard]] inline bool debug_hud_enabled() noexcept {
+    static const bool on = [] {
+        const char* e = std::getenv("WINFLUX_DEBUG_HUD");
+        return e != nullptr && e[0] == '1';
+    }();
+    return on;
+}
+
 inline long long qpc() noexcept {
     LARGE_INTEGER t{};
     QueryPerformanceCounter(&t);
@@ -302,7 +312,8 @@ void Host::destroy() noexcept {
     }
 }
 
-bool Host::create(const Config& config, HINSTANCE instance) noexcept {
+bool Host::create(const Config& config, HINSTANCE instance,
+                  IPresenter* external_presenter) noexcept {
     instance_ = instance;
     ui_thread_id_ = GetCurrentThreadId();   // single-thread invariant (R6)
 
@@ -329,7 +340,13 @@ bool Host::create(const Config& config, HINSTANCE instance) noexcept {
                                 nullptr, nullptr, instance, this);
     if (hwnd == nullptr) return false;
 
-    if (dcomp_presenter_.create(hwnd)) {
+    if (external_presenter != nullptr) {
+        // Test seam (review 2026-10-06 06-R4): an externally-owned presenter
+        // replaces the DComp/Hwnd pair. It must outlive the Host. A presenter
+        // returning a null-rt SurfaceFrame still exercises the full
+        // build/layout/diff pipeline — only the draw is skipped.
+        presenter_ = external_presenter;
+    } else if (dcomp_presenter_.create(hwnd)) {
         presenter_ = &dcomp_presenter_;
     } else if (hwnd_presenter_.create(hwnd)) {
         presenter_ = &hwnd_presenter_;
@@ -443,6 +460,7 @@ void Host::scroll_to(const Path& sv_path, float offset) {
     // alive through the hold with WAKE-only ticks (no animating() => no
     // fullscreen dirty), then promote to real frames when the fade starts.
     scrollbar_fade_at_ms_ = now + 600u;
+    scrollbar_fade_path_ = sv_path;   // damage pass dirties the bar rect while it fades
     if (hwnd_ != nullptr) SetTimer(hwnd_, anim_timer_id_, anim_tick_ms_, nullptr);
     // Virtualization hook: the scroll_view element (still this frame's
     // tree) observes the offset and can rebuild just the visible window.
@@ -625,10 +643,11 @@ void Host::update_cursor() noexcept {
     (void)hit_test_all(last_mouse_lx_, last_mouse_ly_, path);
     Cursor want = Cursor::arrow;
     // Nearest annotated ancestor wins (a label inside a button shows the
-    // button's cursor).
+    // button's cursor). Disabled elements show the arrow — a hand cursor
+    // over a dead control promises interaction it can't deliver (X-4).
     for (Path walk = path; !walk.empty(); walk.pop_back()) {
         if (const Element* e = resolve(walk);
-            e != nullptr && e->props.cursor != Cursor::arrow) {
+            e != nullptr && e->props.enabled && e->props.cursor != Cursor::arrow) {
             want = e->props.cursor;
             break;
         }
@@ -1053,6 +1072,23 @@ void Host::handle_key_down(WPARAM vk) {
     // App key hook first (command palette Ctrl+K and friends).
     if (key_hook_ && key_hook_(static_cast<unsigned>(vk))) return;
 
+    // Hotkey registry (F7) — exact modifier match, first registration wins.
+    {
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        for (const HotkeyEntry& entry : hotkeys_) {
+            if (entry.key.vk == vk && entry.key.ctrl == ctrl
+                && entry.key.shift == shift && entry.key.alt == alt) {
+                auto action = entry.action;   // copy: the action may rebuild state (R-2 pattern)
+                const Generation gen = dirty_generation_;
+                action();
+                ensure_repaint_after_handler(gen);
+                return;
+            }
+        }
+    }
+
     // Esc closes the topmost overlay that HAS a dismiss handler — the
     // host-native tooltip (appended last, no on_click) must not swallow it.
     if (vk == VK_ESCAPE) {
@@ -1391,9 +1427,6 @@ void Host::handle_char(WPARAM ch) {
     // autorepeat doesn't pollute the input.
     if (ch < 0x20) return;
     if (focused_input_path_.empty()) return;
-    if (const Element* e = resolve(focused_input_path_); e != nullptr) {
-                    e->type.c_str(), static_cast<int>(e->props.on_text_change != nullptr));
-    }
     if (const Element* e = resolve(focused_input_path_);
         e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
         std::wstring text = e->props.text;
@@ -1544,7 +1577,17 @@ void Host::paint_frame() {
     const bool overlay_set_changed = frame_overlays_.size() != prev_overlays_.size();
 
     std::vector<Rect> dirty_rects;
-    if (force_full_dirty_ || animating() || overlay_set_changed ||
+    if (force_full_dirty_ || fading_ || overlay_set_changed || overlay_interaction_unresolved) {
+    }
+    // Fullscreen only for what genuinely spans the window: an explicit
+    // force (resize/DPI), the theme cross-fade (every element's colors
+    // interpolate), or an overlay appearing/disappearing. Plain tweens
+    // (hover/press micro-transitions, drawer slides, drag feedback) run
+    // through the diff — the InteractionState pass covers the hovered/
+    // pressed elements and per-frame prop changes surface structurally.
+    // Review 2026-10-06: `animating()` used to force fullscreen here, which
+    // disabled partial repaint for the entire 120 ms of every hover change.
+    if (force_full_dirty_ || fading_ || overlay_set_changed ||
         overlay_interaction_unresolved) {
         if (logical_w > 0.0f && logical_h > 0.0f) {
             dirty_rects.push_back(Rect{0.0f, 0.0f, logical_w, logical_h});
@@ -1563,6 +1606,24 @@ void Host::paint_frame() {
         dirty_rects.insert(dirty_rects.end(),
                            overlay_interaction_rects.begin(),
                            overlay_interaction_rects.end());
+        // Scrollbar auto-hide fade: the bar's alpha is render-time state the
+        // tree diff can't see — dirty its rect explicitly while it holds or
+        // fades (the old blanket-animation fullscreen used to cover this).
+        if (GetTickCount64() <
+            scrollbar_fade_at_ms_ + static_cast<unsigned long long>(tokens::motion_medium_ms)) {
+            if (const Element* sv = resolve(scrollbar_fade_path_);
+                sv != nullptr && sv->type == L"scroll_view") {
+                const auto it = scrolls_.find(scrollbar_fade_path_);
+                if (it != scrolls_.end() && it->second.content_h > it->second.viewport_h) {
+                    const float vw = sv->w - sv->props.padding.left - sv->props.padding.right;
+                    const float bx = sv->x + sv->props.padding.left + vw
+                                   - static_cast<float>(tokens::scrollbar_width) - 2.0f;
+                    dirty_rects.push_back(Rect{bx, sv->y + sv->props.padding.top,
+                                               static_cast<float>(tokens::scrollbar_width) + 4.0f,
+                                               it->second.viewport_h});
+                }
+            }
+        }
         if (dirty_rects.size() > damage_tracker_.max_rects * 2) {
             dirty_rects.assign(1, Rect{0.0f, 0.0f, logical_w, logical_h});
         }
@@ -1570,6 +1631,11 @@ void Host::paint_frame() {
     force_full_dirty_ = false;
 
     const long long t_after_damage = qpc();
+    if (debug_hud_enabled()) {
+        last_build_ms_  = qpc_to_ms(qpc_freq_, t_after_rect - t_frame_start);
+        last_layout_ms_ = qpc_to_ms(qpc_freq_, t_after_layout - t_after_rect);
+        last_damage_ms_ = qpc_to_ms(qpc_freq_, t_after_damage - t_after_layout);
+    }
 
     if (dirty_rects.empty()) {
         // Nothing changed; the composition visual is already correct. Do NOT
@@ -1603,6 +1669,10 @@ void Host::paint_frame() {
                                    Path{-1, static_cast<int>(oi)}, dr);
                 }
             }
+            // Debug HUD (F4): outline exactly what this repaint touched +
+            // a per-frame timing badge. Enabled only via WINFLUX_DEBUG_HUD=1
+            // so release builds pay nothing.
+            if (debug_hud_enabled()) draw_debug_hud(dr, dirty_rects.size());
         }
         renderer_.end();
     }
@@ -1629,6 +1699,9 @@ void Host::paint_frame() {
     last_painted_generation_ = dirty_generation_;
 
     const long long t_end = qpc();
+    if (debug_hud_enabled()) {
+        last_draw_ms_ = qpc_to_ms(qpc_freq_, t_end - t_before_draw);
+    }
     t_total_   += t_end - t_frame_start;                   // GetClientRect + tree build
     t_builder_ += t_after_rect - t_frame_start;
     t_layout_  += t_after_layout - t_after_rect;
@@ -1636,6 +1709,23 @@ void Host::paint_frame() {
     t_draw_    += t_end - t_before_draw;
     ++frame_counter_;
     log_frame_summary(GetTickCount64());
+}
+
+void Host::draw_debug_hud(const Rect& dr, size_t rect_count) noexcept {
+    // Outline the damage rect: exactly what this repaint touched.
+    renderer_.draw_round_rect(Rect{dr.x + 0.5f, dr.y + 0.5f, dr.w - 1.0f, dr.h - 1.0f},
+                              2.0f, shown_.danger, 1.5f, 0.8f);
+    // Per-frame timing badge, drawn when this rect covers the top-left.
+    const Rect badge{8.0f, 8.0f, 620.0f, 24.0f};
+    if (!rects_intersect(dr, badge)) return;
+    wchar_t buf[192];
+    std::swprintf(buf, std::size(buf),
+                  L"HUD  build %.2f  layout %.2f  damage %.2f  draw %.2f ms   rects %zu   gen %llu",
+                  last_build_ms_, last_layout_ms_, last_damage_ms_, last_draw_ms_,
+                  rect_count, static_cast<unsigned long long>(dirty_generation_));
+    renderer_.fill_round_rect(badge, 4.0f, rgba(0, 0, 0, 176), 1.0f);
+    renderer_.draw_text(badge, buf, tokens::font_caption, rgb(255, 255, 255),
+                        false, Align::start, 1.0f);
 }
 
 void Host::flush_perf_log() noexcept {
@@ -1747,12 +1837,34 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
             if (!p.enabled && p.disabled_background.has_value()) {
                 bg = *p.disabled_background;
             } else {
-                if (hover_t > 0.0f && p.hover_background.has_value())
-                    bg = lerp(bg, *p.hover_background, hover_t);
-                if (press_t > 0.0f && p.pressed_background.has_value())
-                    bg = lerp(bg, *p.pressed_background, press_t);
+                // X-4: hover/press states DEFAULT for interactive elements
+                // (review 2026-10-06 — the library injects the affordance
+                // instead of every caller hand-passing Props). Explicit
+                // Props win; non-interactive elements with an explicit
+                // hover_background still animate it.
+                const bool interactive = p.on_click || p.on_value_change;
+                const std::optional<Color> hover_c =
+                    p.hover_background.has_value() ? p.hover_background
+                    : interactive ? std::optional<Color>{pal.surface_hover} : std::nullopt;
+                const std::optional<Color> press_c =
+                    p.pressed_background.has_value() ? p.pressed_background
+                    : interactive ? std::optional<Color>{pal.surface_variant} : std::nullopt;
+                if (hover_t > 0.0f && hover_c.has_value()) bg = lerp(bg, *hover_c, hover_t);
+                if (press_t > 0.0f && press_c.has_value()) bg = lerp(bg, *press_c, press_t);
             }
             renderer_.fill_round_rect(r, p.radius, bg, op);
+        } else if (p.enabled && (hover_t > 0.0f || press_t > 0.0f)
+                   && (p.on_click || p.on_value_change)) {
+            // X-4: interactive carriers without their own background (tabs,
+            // table rows on plain stripes, breadcrumb links) get a default
+            // hover/press wash, faded in through the state blend factor.
+            const Color hover_c = p.hover_background.value_or(pal.surface_hover);
+            const Color press_c = p.pressed_background.value_or(pal.surface_variant);
+            if (press_t > 0.0f) {
+                renderer_.fill_round_rect(r, p.radius, press_c, op * press_t * 0.9f);
+            } else if (hover_t > 0.0f) {
+                renderer_.fill_round_rect(r, p.radius, hover_c, op * hover_t * 0.9f);
+            }
         }
         if (p.border_color.has_value() && p.border_width > 0.0f) {
             const float half = p.border_width * 0.5f;

@@ -66,7 +66,10 @@ public:
     Host(const Host&) = delete;
     Host& operator=(const Host&) = delete;
 
-    [[nodiscard]] bool create(const Config& config, HINSTANCE instance) noexcept;
+    // external_presenter (06-R4 test seam): replaces the DComp/Hwnd pair.
+    // It must already be create()d and must outlive the Host.
+    [[nodiscard]] bool create(const Config& config, HINSTANCE instance,
+                              IPresenter* external_presenter = nullptr) noexcept;
     int run() noexcept;   // message loop; returns WM_QUIT exit code
 
     void set_root_builder(std::function<ElementPtr()> builder);
@@ -100,6 +103,19 @@ public:
     // command palette's Ctrl+K). Return true to consume the key.
     void set_key_hook(std::function<bool(unsigned vk)> hook) noexcept {
         key_hook_ = std::move(hook);
+    }
+    // Hotkey registry (review 2026-10-06 F7): dispatched after the key hook
+    // (which stays the highest-priority escape hatch) and before focus
+    // handling. Modifiers are matched exactly. `label` is for UI surfaces
+    // (command-palette hint column).
+    struct Hotkey {
+        unsigned vk = 0;
+        bool ctrl = false;
+        bool shift = false;
+        bool alt = false;
+    };
+    void add_hotkey(Hotkey k, std::function<void()> action, std::wstring label = {}) {
+        hotkeys_.push_back({k, std::move(action), std::move(label)});
     }
     // Right-click notification (WM_CONTEXTMENU) in logical client units.
     void set_context_menu_handler(std::function<void(float lx, float ly)> h) noexcept {
@@ -287,6 +303,12 @@ private:
     // App-level hooks (set_key_hook / set_context_menu_handler / set_close_handler).
     std::function<bool(unsigned vk)> key_hook_;
     std::function<bool()> close_handler_;
+    struct HotkeyEntry {
+        Hotkey key;
+        std::function<void()> action;
+        std::wstring label;
+    };
+    std::vector<HotkeyEntry> hotkeys_;
     std::function<void(float, float)> context_menu_handler_;
     // Tracks whether any element had Props.autofocus this frame.
     Path autofocus_path_;
@@ -295,6 +317,9 @@ private:
     // invokes the input's on_click handler with the new text. Empty path
     // means no input is in edit mode.
     Path focused_input_path_;
+    // Scrollbar auto-hide: which scroll_view's bar is holding/fading, so the
+    // diff-based damage pass can dirty its rect (render-time alpha state).
+    Path scrollbar_fade_path_;
     // Edit caret + selection anchor into the focused input's text (F1).
     // anchor == caret means no selection. Like the interaction paths these
     // are Host-side state the tree diff cannot see, so caret-only moves
@@ -330,6 +355,12 @@ private:
     static constexpr unsigned long long kPerfEmitMs = 2000;
     void log_frame_summary(unsigned long long now_ms) noexcept;
     void flush_perf_log() noexcept;
+    // Debug HUD (review 2026-10-06 F4) — WINFLUX_DEBUG_HUD=1 only.
+    void draw_debug_hud(const Rect& dr, size_t rect_count) noexcept;
+    double last_build_ms_ = 0.0;
+    double last_layout_ms_ = 0.0;
+    double last_damage_ms_ = 0.0;
+    double last_draw_ms_ = 0.0;
     [[nodiscard]] static const char* perf_log_path() noexcept;
     long long qpc_freq_ = 0;
     unsigned frame_counter_ = 0;   // frames that reached the draw

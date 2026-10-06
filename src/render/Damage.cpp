@@ -97,37 +97,9 @@ void merge_overlapping(std::vector<Rect>& rects) noexcept {
 } // namespace
 
 bool DamageTracker::paint_props_equal(const Props& a, const Props& b) noexcept {
-    if (a.background != b.background) return false;
-    if (a.hover_background != b.hover_background) return false;
-    if (a.pressed_background != b.pressed_background) return false;
-    if (a.disabled_background != b.disabled_background) return false;
-    if (a.border_color != b.border_color) return false;
-    if (a.border_width != b.border_width) return false;
-    if (a.radius != b.radius) return false;
-    if (a.opacity != b.opacity) return false;
-    if (a.background_gradient != b.background_gradient) return false;
-    if (a.shadow_elevation != b.shadow_elevation) return false;
-    if (a.icon != b.icon) return false;
-    if (a.paint_id != b.paint_id) return false;
-    if (a.text != b.text) return false;
-    if (a.font_size_pt != b.font_size_pt) return false;
-    if (a.text_color != b.text_color) return false;
-    if (a.disabled_text_color != b.disabled_text_color) return false;
-    if (a.bold != b.bold) return false;
-    if (a.text_align != b.text_align) return false;
-    if (a.text_wrap != b.text_wrap) return false;
-    if (a.text_ellipsis != b.text_ellipsis) return false;
-    if (a.input_error != b.input_error) return false;
-    if (a.placeholder != b.placeholder) return false;
-    if (a.masked != b.masked) return false;
-    if (a.checked != b.checked) return false;
-    if (a.progress_value != b.progress_value) return false;
-    if (a.slider_value != b.slider_value) return false;
-    if (a.slider_min != b.slider_min) return false;
-    if (a.slider_max != b.slider_max) return false;
-    if (a.enabled != b.enabled) return false;
-    if (a.focusable != b.focusable) return false;
-    return true;
+    // The comparison itself lives next to the fields it guards:
+    // Props::paint_equal (see Element.hpp for the exclusion rationale).
+    return a.paint_equal(b);
 }
 
 const Element* DamageTracker::resolve_path(const Element* root,
@@ -147,13 +119,21 @@ void add_interaction_rects(const Element* prev, const Element* next,
                            const DamageTracker::InteractionState::Path& new_path,
                            std::vector<Rect>& out) noexcept {
     if (old_path == new_path) return;
-    if (const Element* e = DamageTracker::resolve_path(prev, old_path);
-        e != nullptr && rect_valid(rect_of(*e))) {
-        out.push_back(rect_of(*e));
+    // An EMPTY path means "no element" (pointer over the background). It
+    // must NOT resolve — resolve_path({}) returns the tree root, which
+    // turned every hover enter/exit into a fullscreen repaint (found by
+    // the 06-R4 interaction net, 2026-10-06).
+    if (!old_path.empty()) {
+        if (const Element* e = DamageTracker::resolve_path(prev, old_path);
+            e != nullptr && rect_valid(rect_of(*e))) {
+            out.push_back(rect_of(*e));
+        }
     }
-    if (const Element* e = DamageTracker::resolve_path(next, new_path);
-        e != nullptr && rect_valid(rect_of(*e))) {
-        out.push_back(rect_of(*e));
+    if (!new_path.empty()) {
+        if (const Element* e = DamageTracker::resolve_path(next, new_path);
+            e != nullptr && rect_valid(rect_of(*e))) {
+            out.push_back(rect_of(*e));
+        }
     }
 }
 } // namespace

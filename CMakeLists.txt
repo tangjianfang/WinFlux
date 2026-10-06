@@ -30,6 +30,7 @@ add_library(flux STATIC
     src/components/Layout.cpp
     src/components/Data.cpp
     src/components/Pickers.cpp
+    src/components/Chrome.cpp
     src/components/DataViz.cpp
 )
 add_library(WinFlux::flux ALIAS flux)

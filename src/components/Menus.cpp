@@ -238,7 +238,25 @@ void overlay_command_palette(Host& host, CommandHost& cmd, const Palette& pal,
                     if (run) run();
                 }, 30.0f, static_cast<float>(tokens::spacing_sm));
             row->props.radius = static_cast<float>(tokens::radius_sm);
-            list->children.push_back(std::move(row));
+            if (!items[item_idx].hint.empty()) {
+                // F7: accelerator hint column, right-aligned + gray.
+                row->props.flex_grow = 1.0f;
+                Props hp;
+                hp.text = items[item_idx].hint;
+                hp.text_color = pal.text_secondary;
+                hp.font_size_pt = tokens::font_caption;
+                hp.padding = EdgeInsets{0.0f, 0.0f, static_cast<float>(tokens::spacing_sm),
+                                         0.0f};
+                Props rowwrap_p;
+                rowwrap_p.direction = Direction::row;
+                rowwrap_p.align = Align::center;
+                auto wrap = view(std::move(rowwrap_p));
+                wrap->children.push_back(std::move(row));
+                wrap->children.push_back(label(hp.text, std::move(hp)));
+                list->children.push_back(std::move(wrap));
+            } else {
+                list->children.push_back(std::move(row));
+            }
         }
         card->children.push_back(std::move(list));
     }

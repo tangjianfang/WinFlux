@@ -144,6 +144,24 @@ void overlay_modal(Host&, ModalHost&, const Palette&) noexcept;
 [[nodiscard]] ElementPtr icon_button(const Palette&, IconKind kind, std::wstring tip,
                                      ClickHandler on_click, float size = 28.0f);
 
+// ---- App chrome (F23) -------------------------------------------------------
+// Bottom status bar: first section stretches left, the rest pack right.
+[[nodiscard]] ElementPtr status_bar(const Palette&, std::vector<std::wstring> sections,
+                                    Props p = {});
+// Row of icon buttons from (icon, tooltip, on_click) triples.
+struct ToolbarAction {
+    IconKind icon;
+    std::wstring tooltip;
+    std::function<void()> on_click;
+};
+[[nodiscard]] ElementPtr toolbar(const Palette&, std::vector<ToolbarAction> actions,
+                                 Props p = {});
+// Loading placeholder: `lines` staircase-width shimmer bars (static v1).
+[[nodiscard]] ElementPtr skeleton(const Palette&, int lines, Props p = {});
+// Centred icon + title + hint for empty lists/filters.
+[[nodiscard]] ElementPtr empty_state(const Palette&, IconKind kind, std::wstring title,
+                                     std::wstring hint, Props p = {});
+
 // ---- Charts ----------------------------------------------------------------
 // All charts draw through the Props::paint escape hatch; `paint_id`
 // derives from the series so unchanged charts keep the partial-repaint
@@ -229,6 +247,7 @@ void overlay_menu(Host&, MenuHost&, const Palette&) noexcept;
 struct CommandItem {
     std::wstring title;
     std::function<void()> run;
+    std::wstring hint;   // right-aligned accelerator hint ("Ctrl+T", F7)
 };
 
 struct CommandHost {

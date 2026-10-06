@@ -141,6 +141,51 @@ struct Props {
     float slider_value = 0.0f;     // 0..1 normalised, used by slider()
     float slider_min = 0.0f;       // domain minimum, used by slider()
     float slider_max = 1.0f;       // domain maximum, used by slider()
+
+    // Equality over everything that influences RENDERING — the damage diff
+    // feeds this so a changed field triggers a repaint (review 2026-10-06
+    // 06-R1: the list lives WITH the fields so a new paint-visible field is
+    // one screen away from its comparison; forgetting it means the change
+    // never repaints). Deliberately EXCLUDED, with reasons:
+    //   layout inputs — width/height/flex_grow/direction/align/justify/gap/
+    //     padding/margin surface as different x/y/w/h, which the diff
+    //     already compares on the laid-out trees;
+    //   callbacks — paint (compared via paint_id), on_click/on_text_change/
+    //     on_value_change/on_key/on_scroll (no pixels);
+    //   interaction metadata — cursor, tooltip_text, autofocus,
+    //     drag_vertical (no pixels of the element itself).
+    [[nodiscard]] bool paint_equal(const Props& o) const noexcept {
+        return background == o.background
+            && hover_background == o.hover_background
+            && pressed_background == o.pressed_background
+            && disabled_background == o.disabled_background
+            && border_color == o.border_color
+            && border_width == o.border_width
+            && radius == o.radius
+            && opacity == o.opacity
+            && background_gradient == o.background_gradient
+            && shadow_elevation == o.shadow_elevation
+            && icon == o.icon
+            && paint_id == o.paint_id
+            && text == o.text
+            && font_size_pt == o.font_size_pt
+            && text_color == o.text_color
+            && disabled_text_color == o.disabled_text_color
+            && bold == o.bold
+            && text_align == o.text_align
+            && text_wrap == o.text_wrap
+            && text_ellipsis == o.text_ellipsis
+            && input_error == o.input_error
+            && placeholder == o.placeholder
+            && masked == o.masked
+            && checked == o.checked
+            && progress_value == o.progress_value
+            && slider_value == o.slider_value
+            && slider_min == o.slider_min
+            && slider_max == o.slider_max
+            && enabled == o.enabled
+            && focusable == o.focusable;
+    }
 };
 
 struct Element {

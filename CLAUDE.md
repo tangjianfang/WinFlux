@@ -92,12 +92,14 @@ Two things must stay in sync with it, or changes silently fail to repaint:
    the still-executing closure. Follow it with `ensure_repaint_after_handler(gen)` so handlers
    that only flip plain app structs (overlay hosts) still repaint.
 
-2. **New paintable `Props` fields must be added to `DamageTracker::paint_props_equal`.** It
-   compares an explicit field list. A field you forget is a field whose change never triggers a
-   repaint. Layout-only fields (`flex_grow`, `direction`, `padding`, `margin`, `gap`, `align`) are
-   deliberately excluded — they surface as different `x/y/w/h`. The same rule applies to
-   `paint_id`: derive it from **every** input your `Props::paint` closure reads, or data changes
-   that leave the id identical will never repaint (see the radar_chart bug, 2026-10-06).
+2. **New paintable `Props` fields must be added to `Props::paint_equal`** (Element.hpp — the
+   field list lives next to the fields; `DamageTracker::paint_props_equal` delegates to it). A
+   field you forget is a field whose change never triggers a repaint. Layout-only fields
+   (`width/height`, `flex_grow`, `direction`, `padding`, `margin`, `gap`, `align`, `justify`) are
+   deliberately excluded — they surface as different `x/y/w/h` — as are callbacks and
+   interaction-only metadata (see the exclusion rationale in Element.hpp). The same rule applies
+   to `paint_id`: derive it from **every** input your `Props::paint` closure reads, or data
+   changes that leave the id identical will never repaint (see the radar_chart bug, 2026-10-06).
 
 Never compare layout rects before `flex_layout` has run on *both* trees.
 
