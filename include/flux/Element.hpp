@@ -106,6 +106,8 @@ struct Props {
                                    // explicit width for correct measurement)
     bool text_ellipsis = false;    // trim overflow with "…"
     bool input_error = false;      // text_input: danger border (validation)
+    std::wstring placeholder;      // text_input: hint drawn when empty (F1)
+    bool masked = false;           // text_input: password-style bullet rendering
 
     // Interaction
     ClickHandler on_click;

@@ -26,6 +26,7 @@ struct App {
     // Phase A form primitives
     State<std::wstring> input_name;
     State<std::wstring> input_email;
+    State<std::wstring> input_password;
     // Round 7 form-validation demo state. The touched flags gate the error
     // captions: an untouched empty field must not render red on first paint
     // (review 2026-10-06 X-5 — validate-on-load was the anti-pattern).
@@ -424,20 +425,21 @@ ElementPtr inputs_section(App& app) {
     auto name_field = text_input(app.input_name.get(),
         [&app](std::wstring s) { app.input_name.set(std::move(s)); });
 
+    // F1: placeholder is a first-class prop now — no more stacking a label
+    // child over an empty input.
+    Props email_p;
+    email_p.placeholder = L"you@example.com";
     auto email_field = text_input(app.input_email.get(),
-        [&app](std::wstring s) { app.input_email.set(std::move(s)); });
-    {
-        Props p;
-        p.background = pal.surface_variant;
-        p.text_color = pal.text_secondary;
-        p.font_size_pt = tokens::font_caption;
-        p.text_align = Align::start;
-        // Placeholder text shown when the input is empty.
-        auto placeholder = label(L"you@example.com", std::move(p));
-        if (app.input_email.get().empty()) {
-            email_field->children.push_back(std::move(placeholder));
-        }
-    }
+        [&app](std::wstring s) { app.input_email.set(std::move(s)); },
+        std::move(email_p));
+
+    // F1: masked (password-style) input.
+    Props pw_p;
+    pw_p.placeholder = L"Password";
+    pw_p.masked = true;
+    auto password_field = text_input(app.input_password.get(),
+        [&app](std::wstring s) { app.input_password.set(std::move(s)); },
+        std::move(pw_p));
 
     auto value_label = [&] {
         Props p;
@@ -470,6 +472,8 @@ ElementPtr inputs_section(App& app) {
         name_field,
         label(L"Email", field_label_p),
         email_field,
+        label(L"Password (masked)", field_label_p),
+        password_field,
     }, static_cast<float>(tokens::spacing_xs));
 
     auto sliders = col_view({
@@ -2402,6 +2406,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int) {
     app.progress          = app.host.make_state<float>(0.35f);
     app.input_name = app.host.make_state<std::wstring>(L"");
     app.input_email = app.host.make_state<std::wstring>(L"");
+    app.input_password = app.host.make_state<std::wstring>(L"");
     app.form_name = app.host.make_state<std::wstring>(L"");
     app.form_email = app.host.make_state<std::wstring>(L"");
     app.form_name_touched = app.host.make_state<bool>(false);

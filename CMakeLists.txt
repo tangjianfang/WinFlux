@@ -14,6 +14,7 @@ include(WinFluxCompilerOptions)
 
 add_library(flux STATIC
     src/platform/AppHost.cpp
+    src/platform/Clipboard.cpp
     src/platform/Settings.cpp
     src/render/D2DRenderer.cpp
     src/render/DCompPresenter.cpp

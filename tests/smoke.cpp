@@ -1020,6 +1020,32 @@ void test_damage() {
     }
 }
 
+void test_input_props() {
+    // F1: placeholder/masked are paint-visible Props — a change in either
+    // must register in the damage diff or it would never repaint.
+    Props a;
+    a.text = L"";
+    a.placeholder = L"hint";
+    a.masked = false;
+    Props b = a;
+    expect(DamageTracker::paint_props_equal(a, b), "identical input props compare equal");
+    b.placeholder = L"other";
+    expect(!DamageTracker::paint_props_equal(a, b), "placeholder change breaks equality");
+    b = a;
+    b.masked = true;
+    expect(!DamageTracker::paint_props_equal(a, b), "masked change breaks equality");
+
+    // Builder carries them through.
+    Props p;
+    p.placeholder = L"you@example.com";
+    p.masked = true;
+    auto input = text_input(L"secret", nullptr, std::move(p));
+    expect(input->type == L"text_input" && input->props.masked
+               && input->props.placeholder == L"you@example.com",
+           "text_input keeps placeholder/masked");
+    expect(!input->props.text.empty(), "masked input still stores real text");
+}
+
 void test_settings() {
     namespace fs = std::filesystem;
     const auto dir = fs::temp_directory_path() / L"winflux_smoke_settings";
@@ -1090,6 +1116,7 @@ int main() {
     test_layout_row_grow();
     test_layout_column_center();
     test_damage();
+    test_input_props();
     test_settings();
 
     if (failures == 0) {

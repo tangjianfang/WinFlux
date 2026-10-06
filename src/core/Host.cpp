@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+
+#include <flux/Clipboard.hpp>
 
 #include <flux/FlexLayout.hpp>
 #include <flux/flux.hpp>
@@ -903,6 +906,7 @@ void Host::handle_lbutton_down(int px, int py) {
         // keyboard focus ring — WM_CHAR dispatches here, not to focus_path_.
         if (target->type == L"text_input") {
             focused_input_path_ = path;
+            input_caret_ = input_anchor_ = caret_from_x(*target, lx);   // F1
         } else if (!focused_input_path_.empty()) {
             focused_input_path_.clear();
         }
@@ -1031,6 +1035,9 @@ void Host::apply_autofocus() noexcept {
     }
     if (!autofocus_path_.empty() && focused_input_path_ != autofocus_path_) {
         focused_input_path_ = autofocus_path_;
+        if (const Element* fe = resolve(autofocus_path_); fe != nullptr) {
+            input_caret_ = input_anchor_ = fe->props.text.size();   // F1
+        }
     }
 }
 
@@ -1064,19 +1071,150 @@ void Host::handle_key_down(WPARAM vk) {
         }
     }
 
-    // VK_BACK on a focused text_input deletes the trailing character. We do
-    // this in WM_KEYDOWN because VK_BACK does not generate a WM_CHAR message.
+    // VK_BACK on a focused text_input deletes the selection, or the single
+    // character before the caret. We do this in WM_KEYDOWN because VK_BACK
+    // does not generate a WM_CHAR message.
     if (vk == VK_BACK && !focused_input_path_.empty()) {
         if (const Element* e = resolve(focused_input_path_);
             e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
             std::wstring text = e->props.text;
-            if (!text.empty()) text.pop_back();
+            const auto [lo, hi] = input_sel_range();
+            const size_t clo = std::min(lo, text.size());
+            const size_t chi = std::min(hi, text.size());
+            if (clo != chi) {
+                text.erase(clo, chi - clo);
+                input_caret_ = input_anchor_ = clo;
+            } else if (input_caret_ > 0 && !text.empty()) {
+                text.erase(input_caret_ - 1, 1);
+                input_caret_ = input_anchor_ = input_caret_ - 1;
+            }
             const auto on_change = e->props.on_text_change;   // R-2
             const Generation gen = dirty_generation_;
             on_change(std::move(text));
             ensure_repaint_after_handler(gen);
         }
         return;
+    }
+
+    // Text-editing keys for the focused input (F1): caret movement, selection
+    // (Shift+arrows, Ctrl+A), Delete, and clipboard via Ctrl+C/X/V. Arrows /
+    // Home / End are claimed only when the input has no on_key of its own —
+    // the command palette's input navigates its list with them instead.
+    if (!focused_input_path_.empty()) {
+        if (const Element* fe = resolve(focused_input_path_);
+            fe != nullptr && fe->type == L"text_input" && fe->props.enabled) {
+            const bool nav_claimed = fe->props.on_key != nullptr;
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const std::wstring cur = fe->props.text;
+            const size_t len = cur.size();
+            // Clamp against the current text: handlers/rebuilds may have
+            // shortened it since the selection was made (see handle_char).
+            const auto raw_sel = input_sel_range();
+            const std::pair<size_t, size_t> sel{std::min(raw_sel.first, len),
+                                                std::min(raw_sel.second, len)};
+            bool handled = false;
+            bool text_changed = false;
+            std::wstring next = cur;
+            const auto move_caret = [&](size_t pos) {
+                input_caret_ = pos;
+                if (!shift) input_anchor_ = pos;
+            };
+            switch (vk) {
+            case VK_LEFT:
+                if (!nav_claimed) {
+                    handled = true;
+                    if (sel.first != sel.second && !shift) {
+                        input_caret_ = input_anchor_ = sel.first;
+                    } else {
+                        move_caret(input_caret_ > 0 ? input_caret_ - 1 : 0);
+                    }
+                }
+                break;
+            case VK_RIGHT:
+                if (!nav_claimed) {
+                    handled = true;
+                    if (sel.first != sel.second && !shift) {
+                        input_caret_ = input_anchor_ = sel.second;
+                    } else {
+                        move_caret(input_caret_ < len ? input_caret_ + 1 : len);
+                    }
+                }
+                break;
+            case VK_HOME:
+                if (!nav_claimed) { handled = true; move_caret(0); }
+                break;
+            case VK_END:
+                if (!nav_claimed) { handled = true; move_caret(len); }
+                break;
+            case VK_DELETE:
+                handled = true;
+                if (sel.first != sel.second) {
+                    next.erase(sel.first, sel.second - sel.first);
+                    input_caret_ = input_anchor_ = sel.first;
+                    text_changed = true;
+                } else if (input_caret_ < len) {
+                    next.erase(input_caret_, 1);
+                    input_anchor_ = input_caret_;
+                    text_changed = true;
+                }
+                break;
+            case 'A': case 'C': case 'X': case 'V':
+                if (ctrl) {   // plain letters arrive as WM_CHAR instead
+                    handled = true;
+                    if (vk == 'A') {
+                        input_anchor_ = 0;
+                        input_caret_ = len;
+                    } else if (vk == 'C' || vk == 'X') {
+                        // Windows convention: with no selection, copy/cut
+                        // the whole single-line field.
+                        const std::wstring sel_text =
+                            sel.first != sel.second ? cur.substr(sel.first, sel.second - sel.first)
+                                                    : cur;
+                        (void)flux::clipboard_set_text(sel_text);
+                        if (vk == 'X') {
+                            if (sel.first != sel.second) {
+                                next = cur.substr(0, sel.first) + cur.substr(sel.second);
+                                input_caret_ = input_anchor_ = sel.first;
+                            } else {
+                                next.clear();
+                                input_caret_ = input_anchor_ = 0;
+                            }
+                            text_changed = true;
+                        }
+                    } else {   // V — newlines don't belong in a single-line input
+                        std::wstring paste;
+                        for (const wchar_t c : flux::clipboard_get_text()) {
+                            if (c != L'\r' && c != L'\n') paste.push_back(c);
+                        }
+                        if (!paste.empty()) {
+                            next = cur.substr(0, sel.first) + paste + cur.substr(sel.second);
+                            input_caret_ = input_anchor_ = sel.first + paste.size();
+                            text_changed = true;
+                        }
+                    }
+                }
+                break;
+            default:
+                break;
+            }
+            if (handled) {
+                if (text_changed) {
+                    if (fe->props.on_text_change) {
+                        const auto on_change = fe->props.on_text_change;   // R-2
+                        const Generation gen = dirty_generation_;
+                        on_change(std::move(next));
+                        ensure_repaint_after_handler(gen);
+                    }
+                } else {
+                    // Caret/selection-only move: invisible to the tree diff
+                    // (Host-side state), so force one full dirty frame.
+                    force_full_dirty_ = true;
+                    request_render();
+                }
+                return;
+            }
+        }
     }
 
     // Focused scroll_view: arrow / page / home / end scrolling.
@@ -1200,6 +1338,7 @@ void Host::handle_key_down(WPARAM vk) {
             if (const Element* fe = resolve(focus_path_);
                 fe != nullptr && fe->type == L"text_input") {
                 focused_input_path_ = focus_path_;
+                input_caret_ = input_anchor_ = fe->props.text.size();   // F1
             } else if (!focused_input_path_.empty()) {
                 focused_input_path_.clear();
             }
@@ -1219,6 +1358,32 @@ void Host::handle_key_down(WPARAM vk) {
     }
 }
 
+std::pair<size_t, size_t> Host::input_sel_range() const noexcept {
+    return input_anchor_ < input_caret_ ? std::pair<size_t, size_t>{input_anchor_, input_caret_}
+                                        : std::pair<size_t, size_t>{input_caret_, input_anchor_};
+}
+
+size_t Host::caret_from_x(const Element& e, float x) noexcept {
+    // Nearest character boundary to the click: prefix widths come from the
+    // (cached) text measurements, so this is a handful of cache hits for
+    // typical input lengths.
+    const std::wstring& text = e.props.text;
+    const float rel = x - (e.x + e.props.padding.left);
+    if (rel <= 0.0f) return 0;
+    size_t best = text.size();
+    float best_dist = rel;
+    for (size_t i = 0; i <= text.size(); ++i) {
+        const auto [w, h] = renderer_.measure_text(text.substr(0, i),
+                                                   e.props.font_size_pt, false);
+        const float d = std::fabs(w - rel);
+        if (d < best_dist) {
+            best_dist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
 void Host::handle_char(WPARAM ch) {
     // WM_CHAR delivers UTF-16 code units (wchar_t on Windows). VK_BACK has
     // already been handled in WM_KEYDOWN, and we want printable characters
@@ -1226,10 +1391,22 @@ void Host::handle_char(WPARAM ch) {
     // autorepeat doesn't pollute the input.
     if (ch < 0x20) return;
     if (focused_input_path_.empty()) return;
+    if (const Element* e = resolve(focused_input_path_); e != nullptr) {
+                    e->type.c_str(), static_cast<int>(e->props.on_text_change != nullptr));
+    }
     if (const Element* e = resolve(focused_input_path_);
         e != nullptr && e->type == L"text_input" && e->props.on_text_change) {
         std::wstring text = e->props.text;
-        text.push_back(static_cast<wchar_t>(ch));
+        // Typing replaces the selection, then inserts at its start (F1).
+        // Indices clamp against the CURRENT text: an app handler (or a
+        // rebuilt tree) may have shortened it since the caret last moved —
+        // erase/substr past the end throw.
+        const auto [lo, hi] = input_sel_range();
+        const size_t clo = std::min(lo, text.size());
+        const size_t chi = std::min(hi, text.size());
+        text.erase(clo, chi - clo);
+        text.insert(clo, 1, static_cast<wchar_t>(ch));
+        input_caret_ = input_anchor_ = clo + 1;
         const auto on_change = e->props.on_text_change;   // R-2: survives a nested rebuild
         on_change(std::move(text));
         // Handlers that mutate plain app structs (not State<T>) don't
@@ -1663,13 +1840,32 @@ void Host::render_element(const Element& e, const Path& path, const Rect& clip) 
         const Color tc = p.enabled ? pal.text : pal.text_secondary;
         const Rect text_r{r.x + p.padding.left, r.y,
                           r.w - p.padding.left - p.padding.right, r.h};
-        renderer_.draw_text(text_r, p.text, p.font_size_pt, tc, false, Align::start, op);
-        // Caret: thin 1px accent line at the trailing edge of the text. No
-        // blink animation in this pass; a blink would need a timer + State<T>
-        // round-trip and the existing framework doesn't have a cheap hook
-        // for it. Caret visibility IS enough to communicate focus.
+        // F1: masked inputs render bullets; the caret/selection indices still
+        // address the real text (same length, so mapping is 1:1).
+        const std::wstring shown = p.masked ? std::wstring(p.text.size(), L'●') : p.text;
+        const size_t caret = std::min(input_caret_, shown.size());
+        const size_t anchor = std::min(input_anchor_, shown.size());
+        if (is_focused && p.enabled && caret != anchor) {
+            const auto [w1, h1] = renderer_.measure_text(
+                shown.substr(0, std::min(caret, anchor)), p.font_size_pt, false);
+            const auto [w2, h2] = renderer_.measure_text(
+                shown.substr(0, std::max(caret, anchor)), p.font_size_pt, false);
+            renderer_.fill_rect(Rect{text_r.x + w1, r.y + 2.0f, w2 - w1, r.h - 4.0f},
+                                pal.selection);
+        }
+        if (!shown.empty()) {
+            renderer_.draw_text(text_r, shown, p.font_size_pt, tc, false, Align::start, op);
+        } else if (!p.placeholder.empty()) {
+            renderer_.draw_text(text_r, p.placeholder, p.font_size_pt, pal.text_secondary,
+                                false, Align::start, op);
+        }
+        // Caret: thin accent line at the caret index. No blink animation in
+        // this pass — a blink must dirty only the input's rect (partial
+        // animation), which the framework doesn't have yet; a steady caret
+        // is enough to communicate focus without a 60fps fullscreen cost.
         if (is_focused && p.enabled) {
-            const auto [tw, th] = renderer_.measure_text(p.text, p.font_size_pt, false);
+            const auto [tw, th] = renderer_.measure_text(shown.substr(0, caret),
+                                                         p.font_size_pt, false);
             const float caret_x = text_r.x + tw;
             const float caret_h = th;
             const float caret_y = r.y + (r.h - caret_h) * 0.5f;

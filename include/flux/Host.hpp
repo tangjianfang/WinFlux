@@ -178,6 +178,11 @@ private:
     void handle_lbutton_up(int px, int py);
     void handle_key_down(WPARAM vk);
     void handle_char(WPARAM ch);
+    // Sorted [lo, hi) selection window of the focused input (F1).
+    [[nodiscard]] std::pair<size_t, size_t> input_sel_range() const noexcept;
+    // Caret index whose rendered boundary is nearest to client-logical x.
+    // Non-const: prefix measurements go through the renderer's text cache.
+    [[nodiscard]] size_t caret_from_x(const Element& e, float x) noexcept;
     void handle_mouse_wheel(int delta, int px, int py);
     void handle_contextmenu(int screen_x, int screen_y);
     // Applies a scroll delta (or absolute target) to the scroll_view at
@@ -290,6 +295,12 @@ private:
     // invokes the input's on_click handler with the new text. Empty path
     // means no input is in edit mode.
     Path focused_input_path_;
+    // Edit caret + selection anchor into the focused input's text (F1).
+    // anchor == caret means no selection. Like the interaction paths these
+    // are Host-side state the tree diff cannot see, so caret-only moves
+    // force one full dirty frame (typing itself diffs through Props.text).
+    size_t input_caret_ = 0;
+    size_t input_anchor_ = 0;
     // Snapshots of the above from the previous paint_frame, used to feed the
     // damage diff so hover/press/focus changes produce partial repaints
     // instead of being forced into a fullscreen update.

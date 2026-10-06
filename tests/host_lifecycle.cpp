@@ -95,6 +95,37 @@ int main() {
     host.request_render();   // same shape: overlay diff path
     check(host.hwnd() != nullptr, "Host survives scroll_view + overlay round-trips");
 
+    // F1 text-input round-trip through the REAL message path: autofocus
+    // steers focused_input_path_ during paint_frame, then WM_CHAR /
+    // VK_BACK dispatch synchronously (SendMessage) into handle_char /
+    // handle_key_down and must surface in the app-side string.
+    {
+        std::wstring typed;
+        host.set_root_builder([&host, &typed] {
+            Props ip;
+            ip.autofocus = true;
+            ip.placeholder = L"type here";
+            // Like a real app, the value round-trips through app state —
+            // the rebuilt tree re-renders the current text.
+            auto input = text_input(typed,
+                                    [&typed](std::wstring v) { typed = std::move(v); },
+                                    std::move(ip));
+            Props rp;
+            rp.padding = {16, 16, 16, 16};
+            return with_children(view(std::move(rp)), {std::move(input)});
+        });
+        host.request_render();   // builder + autofocus apply here
+        SendMessageW(host.hwnd(), WM_CHAR, L'A', 0);
+        SendMessageW(host.hwnd(), WM_CHAR, L'B', 0);
+        SendMessageW(host.hwnd(), WM_CHAR, L'C', 0);
+        check(typed == L"ABC", "WM_CHAR appends through on_text_change");
+        SendMessageW(host.hwnd(), WM_KEYDOWN, VK_BACK, 0);
+        check(typed == L"AB", "VK_BACK deletes the trailing character");
+        SendMessageW(host.hwnd(), WM_KEYDOWN, VK_HOME, 0);
+        SendMessageW(host.hwnd(), WM_KEYDOWN, VK_DELETE, 0);
+        check(typed == L"B", "Home + Delete removes the leading character");
+    }
+
     // Exit path probe (review 2026-10-06 R-3): WM_CLOSE must destroy the
     // window AND end the message loop (WM_DESTROY -> PostQuitMessage). A
     // watchdog thread posts a fallback WM_QUIT after 5 s so a regression
