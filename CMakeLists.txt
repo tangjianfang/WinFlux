@@ -78,23 +78,27 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_tokens.py)
 endif()
 
-# MSVC ASan uses a dynamic runtime (clang_rt.asan_dynamic-x86_64.dll) that is
-# NOT on PATH for a plain ctest invocation — copy it next to the test exes so
-# the x64-asan preset runs out of the box (review 2026-10-06, 06-R11).
+# MSVC ASan links a dynamic runtime (clang_rt.asan_dynamic-x86_64.dll) that
+# is not on PATH and that MSBuild injects regardless of CRT/nodefaultlib
+# settings — copy it next to EVERY exe in the tree so anything launched from
+# the build directory works by double-click. Exes relocated elsewhere by
+# external tools still need this DLL; for normal runs prefer the x64-debug /
+# x64-release trees (no sanitizer involved at all).
 if(CMAKE_CXX_FLAGS MATCHES "/fsanitize=address")
-    # VSINSTALLDIR is only set inside a developer prompt — scan the usual
-    # install roots instead so configure-from-anywhere works.
+    # ASAN metadata disables incremental linking anyway — opt out cleanly
+    # instead of an LNK4300 warning per target.
+    target_link_options(flux PUBLIC "/INCREMENTAL:NO")
     file(GLOB _asan_dll
          "C:/Program Files/Microsoft Visual Studio/2022/*/VC/Tools/MSVC/*/bin/Hostx64/x64/clang_rt.asan_dynamic-x86_64.dll"
          "$ENV{VSINSTALLDIR}VC/Tools/MSVC/*/bin/Hostx64/x64/clang_rt.asan_dynamic-x86_64.dll")
     if(_asan_dll)
         list(GET _asan_dll 0 _asan_dll_copy)
-        foreach(_t WinFluxSmokeTest WinFluxHostLifecycleTest)
+        foreach(_t WinFluxSmokeTest WinFluxHostLifecycleTest WinFluxGallery WinFluxDashboard)
             add_custom_command(TARGET ${_t} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${_asan_dll_copy}" "$<TARGET_FILE_DIR:${_t}>")
         endforeach()
     else()
-        message(WARNING "ASan runtime DLL not found — tests may fail to launch.")
+        message(WARNING "ASan runtime DLL not found — asan-tree exes may fail to launch.")
     endif()
 endif()
