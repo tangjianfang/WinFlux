@@ -1,9 +1,8 @@
 name: build
 
+# Actions minutes were at 90%. CI is manual until re-enabled.
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   windows:
